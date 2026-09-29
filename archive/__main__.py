@@ -16,11 +16,19 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     migrate_parser = commands.add_parser("migrate", help="Migrate the archive database schema")
     migrate_parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    gui_parser = commands.add_parser("gui", help="Open the archive desktop interface")
+    gui_parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    gui_parser.add_argument("--raw-directory", type=Path, default=Path(__file__).resolve().parent.parent / "01_Raw")
     args = parser.parse_args()
 
     database_path = args.database.resolve()
     if not database_path.exists():
         parser.error(f"Database does not exist: {database_path}")
+
+    if args.command == "gui":
+        from archive.gui import run
+
+        return run(database_path, args.raw_directory.resolve())
 
     print("Opening database...")
     connection = sqlite3.connect(database_path)

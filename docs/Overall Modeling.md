@@ -1847,6 +1847,24 @@ The generated reader may show a friendly name, but it must preserve enough ident
 
 ## IX. GUI Architecture
 
+Implement the application layers in this order:
+
+```text
+SQLite
+  ↓
+Application services
+  ↓
+Search
+  ↓
+Reader
+  ↓
+GUI
+  ↓
+Startup synchronization
+  ↓
+Windows packaging
+```
+
 ### 1. Architectural diagram
 
 ```text
@@ -1963,20 +1981,17 @@ Locate configured raw archive
 Scan source files
     ↓
 Compare logical sources, scopes, capture hashes, and import history
-    ↓
-No changes? ───────────────► Open application
-    ↓
-Changes found
-    ↓
-Validate imports
-    ↓
-Import transactionally
-    ↓
+  ├── No changes ─────────► Open Home
+  ↓ Changes found
+Import changed sources
+  ↓
+Validate imports and database integrity
+  ↓
 Rebuild affected indexes
-    ↓
+  ↓
 Record results and warnings
-    ↓
-Open application
+  ↓
+Open Home
 ```
 
 The application must not silently import malformed files or hide import errors. It should show progress and preserve a readable import report.
