@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import tkinter as tk
 from queue import Empty, Queue
@@ -9,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from archive.reader_service import ReaderService
+from archive.ollama_service import ArchiveAnswerService, OllamaClient
 from archive.search_service import SearchService
 from archive.sync_service import StartupSyncReport, synchronize_archive
 
@@ -22,6 +24,8 @@ class ArchiveApp:
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.search_service = SearchService(self.connection)
         self.reader_service = ReaderService(self.connection)
+        self.ollama_client = OllamaClient()
+        self.answer_service = ArchiveAnswerService(self.search_service, self.ollama_client)
 
         self.root.title("Discord RP Archive")
         self.root.geometry("1080x720")
@@ -38,6 +42,7 @@ class ArchiveApp:
         self._build_home(sync_report)
         self._build_search()
         self._build_reader()
+        self._build_ask()
 
     def _build_home(self, sync_report: StartupSyncReport) -> None:
         page = ttk.Frame(self.pages, padding=20)
@@ -128,6 +133,133 @@ class ArchiveApp:
         self.reader_text.configure(yscrollcommand=scrollbar.set)
         self.reader_text.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+    def _build_ask(self) -> None:
+        page = ttk.Frame(self.pages, padding=14)
+        self.pages.add(page, text="Ask")
+
+        model_row = ttk.Frame(page)
+        model_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(model_row, text="Ollama model").pack(side="left")
+        self.model_name = tk.StringVar(value=os.environ.get("OLLAMA_MODEL", ""))
+        self.model_picker = ttk.Combobox(model_row, textvariable=self.model_name, state="normal", width=32)
+        self.model_picker.pack(side="left", padx=(8, 8))
+        self.model_refresh = ttk.Button(model_row, text="Refresh models", command=self._refresh_models)
+        self.model_refresh.pack(side="left")
+
+        ttk.Label(page, text="Question").pack(anchor="w")
+        self.ask_question = tk.Text(page, height=4, wrap="word", padx=8, pady=6)
+        self.ask_question.pack(fill="x", pady=(4, 8))
+        self.ask_button = ttk.Button(page, text="Ask archive", command=self._ask_archive)
+        self.ask_button.pack(anchor="w")
+        self.ask_status = ttk.Label(page, text="Answers are generated only from retrieved archive messages.", foreground="#58636d")
+        self.ask_status.pack(anchor="w", pady=(8, 6))
+
+        ttk.Label(page, text="Answer", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.ask_answer = tk.Text(page, height=10, wrap="word", state="disabled", padx=10, pady=8)
+        self.ask_answer.pack(fill="both", expand=True, pady=(4, 8))
+        ttk.Label(page, text="Retrieved evidence", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.ask_evidence = tk.Text(page, height=8, wrap="word", state="disabled", padx=10, pady=8)
+        self.ask_evidence.pack(fill="both", expand=True, pady=(4, 0))
+
+    def _ask_archive(self) -> None:
+        question = self.ask_question.get("1.0", "end").strip()
+        if not question:
+            self.ask_status.configure(text="Enter a question first.")
+            return
+        try:
+            evidence = self.answer_service.retrieve(question)
+        except sqlite3.Error as exc:
+            self.ask_status.configure(text=f"Archive retrieval failed: {exc}")
+            return
+
+        self._set_text(self.ask_answer, "")
+        if not evidence:
+            self._set_text(self.ask_evidence, "")
+            self._set_text(self.ask_answer, "No matching archive evidence was found; no model answer was generated.")
+            self.ask_status.configure(text="No evidence matched this question.")
+            return
+
+        self._set_text(self.ask_evidence, self._format_evidence(evidence))
+        self.ask_button.configure(state="disabled")
+        self.ask_status.configure(text="Asking Ollama...")
+        model = self.model_name.get().strip()
+        self._run_background(
+            lambda: self.ollama_client.generate(model, question, evidence),
+            lambda answer: self._finish_answer(answer, len(evidence)),
+            lambda error: self._finish_answer_error(error),
+        )
+
+    def _refresh_models(self) -> None:
+        self.model_refresh.configure(state="disabled")
+        self.ask_status.configure(text="Checking local Ollama models...")
+        self._run_background(
+            self.ollama_client.list_models,
+            self._finish_model_refresh,
+            lambda error: self._finish_model_refresh_error(error),
+        )
+
+    def _run_background(self, task: Any, on_success: Any, on_error: Any) -> None:
+        events: Queue[tuple[str, Any]] = Queue()
+
+        def run_task() -> None:
+            try:
+                events.put(("success", task()))
+            except Exception as error:
+                events.put(("error", error))
+
+        def poll() -> None:
+            try:
+                event, result = events.get_nowait()
+            except Empty:
+                self.root.after(80, poll)
+                return
+            if event == "success":
+                on_success(result)
+            else:
+                on_error(result)
+
+        Thread(target=run_task, daemon=True).start()
+        self.root.after(80, poll)
+
+    def _finish_answer(self, answer: str, evidence_count: int) -> None:
+        self._set_text(self.ask_answer, answer)
+        self.ask_status.configure(text=f"Answer generated from {evidence_count} retrieved message(s).")
+        self.ask_button.configure(state="normal")
+
+    def _finish_answer_error(self, error: Exception) -> None:
+        self.ask_status.configure(text=f"Ollama request failed: {error}")
+        self.ask_button.configure(state="normal")
+
+    def _finish_model_refresh(self, models: list[str]) -> None:
+        self.model_picker.configure(values=models)
+        self.ask_status.configure(text=f"Found {len(models)} local model(s); select one to continue.")
+        self.model_refresh.configure(state="normal")
+
+    def _finish_model_refresh_error(self, error: Exception) -> None:
+        self.ask_status.configure(text=f"Could not list Ollama models: {error}")
+        self.model_refresh.configure(state="normal")
+
+    @staticmethod
+    def _set_text(widget: tk.Text, value: str) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", value)
+        widget.configure(state="disabled")
+
+    @classmethod
+    def _format_evidence(cls, evidence: list[dict[str, Any]]) -> str:
+        blocks = []
+        for index, item in enumerate(evidence, start=1):
+            author = cls._author(item)
+            header = " | ".join(
+                value for value in (item.get("timestamp_utc"), item.get("channel_name"), author) if value
+            )
+            blocks.append(
+                f"[E{index}] {header}\nSource: {item.get('source_path') or 'Unknown source'}\n"
+                f"{item.get('content_original') or ''}"
+            )
+        return "\n\n".join(blocks)
 
     def _search(self) -> None:
         query = self.query.get().strip()

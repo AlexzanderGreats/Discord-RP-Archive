@@ -400,9 +400,11 @@ ordered chronologically. An observation outside the current accepted captures
 or an unknown observation returns `None`.
 
 Both services select observations from the latest accepted capture of each
-logical source by default. This initial search implementation covers Discord
-message text only; it does not yet parse the modeled boolean/field-filter query
-language, search documents, or use FTS. Focused coverage is in
+logical source by default. `search()` performs literal substring matching;
+`search_relevant()` ranks Discord messages by matching up to ten distinct
+question terms. Search currently covers Discord message text only; it does not
+yet parse the modeled boolean/field-filter query language, search documents, or
+use FTS. Focused coverage is in
 `tests/test_search_reader_services.py`.
 
 ## Desktop GUI and Startup Synchronization
@@ -435,11 +437,23 @@ source/message counts, and the sync summary. With no imports, index rebuilding
 is skipped. The current schema has no FTS virtual table, so this rebuilds only
 indexes that already exist; FTS remains deferred.
 
-Home, Search, and Reader are the first GUI surfaces. Search uses
+Home, Search, Reader, and Ask are the current GUI surfaces. Search uses
 `SearchService`; double-clicking a result opens its surrounding channel context
-through `ReaderService`. The GUI contains no importer or query business logic.
-PyInstaller packaging remains a later step, after the application behavior is
-stable.
+through `ReaderService`. Ask retrieves current Discord messages with
+`search_relevant()` and sends only those messages, with source metadata, to the
+local Ollama chat API. The answer is displayed beside the retrieved evidence;
+if retrieval finds nothing, Ollama is not called. The model is instructed to
+cite evidence references, but generated citations are not independently
+validated. This is keyword retrieval, not semantic or document retrieval.
+
+Ollama Q&A uses the local endpoint `http://127.0.0.1:11434` by default and adds
+no Python package dependencies. Ensure Ollama is running and a model is
+available (`ollama list`), open the Ask tab, select **Refresh models**, choose a
+model, and submit a question. `OLLAMA_HOST` overrides the endpoint and
+`OLLAMA_MODEL` prefills the model field. Retrieved message text is sent to the
+configured Ollama endpoint, so keep `OLLAMA_HOST` local when local-only
+processing is required. PyInstaller packaging remains a later step, after the
+application behavior is stable.
 
 ## Verification
 

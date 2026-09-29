@@ -135,6 +135,17 @@ clean run is accepted; partial or failed runs do not advance the current capture
 The document importer parses a file first, then performs classification,
 chunking, entry detection, and database insertion inside a transaction.
 
+## Ollama Q&A (Initial Slice)
+
+The Ask view retrieves up to eight current accepted Discord messages by
+question-term overlap, then sends those records and their source metadata to
+Ollama's local `/api/chat` endpoint. The model is prompted to answer only from
+the supplied evidence and cite references such as `[E1]`. Retrieved records
+remain visible alongside the answer, and no model request is made when there is
+no matching evidence. This first slice does not search document chunks, use
+semantic embeddings, or validate citations produced by the model. LLM output
+remains an interpretation, not authoritative archive evidence.
+
 ## `build_archive.py`: Discord JSON Pipeline
 
 ### Where a file enters the pipeline

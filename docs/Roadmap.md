@@ -769,7 +769,7 @@ I'd describe the project like this:
 | Advanced Boolean search | 🔴 Not implemented                                   |
 | GUI                     | 🔴 Not implemented                                   |
 | Startup synchronization | 🔴 Not implemented                                   |
-| LLM/RAG                 | 🔴 Not implemented                                   |
+| LLM/RAG                 | 🟡 Local Ollama Q&A for retrieved Discord messages; semantic/document retrieval pending |
 | Backups/recovery        | 🔴 Not implemented                                   |
 | Automated tests         | 🔴 Not implemented                                   |
 | Packaging `.exe`        | 🔴 Not implemented                                   |

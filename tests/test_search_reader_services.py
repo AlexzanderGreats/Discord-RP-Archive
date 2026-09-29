@@ -58,6 +58,16 @@ class SearchReaderServiceTests(unittest.TestCase):
         self.assertEqual(result[0]["channel_name"], "Channel")
         self.assertEqual(result[0]["author_discord_name_original"], "Author")
 
+    def test_relevant_search_ranks_question_terms_and_skips_stop_words(self) -> None:
+        result = self.search_service.search_relevant("Where is the silver compass?")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["content_original"], "A silver compass")
+        self.assertEqual(result[0]["relevance_score"], 2)
+
+    def test_relevant_search_returns_empty_when_no_search_terms_remain(self) -> None:
+        self.assertEqual(self.search_service.search_relevant("Who is it?"), [])
+
     def test_reader_returns_chronological_channel_context(self) -> None:
         middle = self.connection.execute(
             "SELECT message_observation_id FROM messages WHERE discord_message_id = 'two'"
