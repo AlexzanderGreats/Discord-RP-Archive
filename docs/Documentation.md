@@ -224,16 +224,19 @@ calculated from the Python file and, when present, its SQL file.
 The runner creates `schema_migrations` with `version`, `name`, `checksum`, and
 `applied_at`, along with the specified name and checksum indexes. It checks
 that recorded versions are contiguous, that every recorded migration still
-exists, and that its name and checksum have not changed. Each pending migration
-runs in its own SQLite transaction; the ledger row is written only after that
-migration succeeds. A failed step is rolled back, and already completed steps
-remain recorded so the command can be run again after resolving the failure.
-Running the command against an up-to-date database is a no-op. There is no
-automatic downgrade mechanism.
+exists, and that its name and checksum match either the current migration or an
+explicitly recognized historical checksum. The compatibility list covers
+known earlier checksums for migrations 001, 003-009, and 011; arbitrary checksum
+changes are still rejected. Each pending migration runs in its own SQLite
+transaction; the ledger row is written only after that migration succeeds. A
+failed step is rolled back, and already completed steps remain recorded so the
+command can be run again after resolving the failure. Running the command
+against an up-to-date database is a no-op. There is no automatic downgrade
+mechanism.
 
 ## Migration History
 
-The current migration chain has fourteen steps:
+The current migration chain has fifteen steps:
 
 | Version | Migration | Effect |
 | ---: | --- | --- |
@@ -251,6 +254,7 @@ The current migration chain has fourteen steps:
 | 012 | `group_legacy_source_captures` | Groups legacy Discord captures by source path and declared server/category/channel scope. |
 | 013 | `create_document_entries` | Creates the typed `document_entries` table, preserves retained legacy entries, and groups legacy document captures by source path. |
 | 014 | `create_attribution` | Creates character/player attribution records and immutable attribution audit events. |
+| 015 | `create_scenes` | Creates arcs, scenes, scene-message membership, participants, and the derived scene-channel view. |
 
 When present, incompatible legacy `imports`, `messages`, `documents`,
 `document_chunks`, `document_entries`, and the document FTS table are renamed
@@ -401,6 +405,42 @@ message text only; it does not yet parse the modeled boolean/field-filter query
 language, search documents, or use FTS. Focused coverage is in
 `tests/test_search_reader_services.py`.
 
+## Desktop GUI and Startup Synchronization
+
+Open the desktop application from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m archive gui
+```
+
+The default database is `02_Processed/archive.sqlite3` and the default raw
+archive is `01_Raw`. Override either path when needed:
+
+```powershell
+.\.venv\Scripts\python.exe -m archive gui --database path\to\archive.sqlite3 --raw-directory path\to\raw
+```
+
+At launch, the application opens a progress window, runs pending schema
+migrations, scans the raw directory recursively for JSON, TXT, PDF, and DOCX
+files, and compares each file's resolved path and SHA-256 hash with import
+history. Previously recorded unchanged captures are skipped. New or changed
+captures are sent to the existing Discord or document importer; raw files are
+not modified. Per-file failures and warnings are retained and shown on Home.
+
+After imports, startup validates the database with `PRAGMA quick_check` and
+`PRAGMA foreign_key_check`. A validation failure stops launch and displays an
+error. If imports occurred, the application runs SQLite `REINDEX` and
+`PRAGMA optimize`; then Home opens with database health, schema version,
+source/message counts, and the sync summary. With no imports, index rebuilding
+is skipped. The current schema has no FTS virtual table, so this rebuilds only
+indexes that already exist; FTS remains deferred.
+
+Home, Search, and Reader are the first GUI surfaces. Search uses
+`SearchService`; double-clicking a result opens its surrounding channel context
+through `ReaderService`. The GUI contains no importer or query business logic.
+PyInstaller packaging remains a later step, after the application behavior is
+stable.
+
 ## Verification
 
 Run the full test suite, including importer, migration, search, and database
@@ -423,9 +463,10 @@ observations remain and a malformed later capture is not accepted.
 chunks and entries, and retention of failed extraction provenance without
 writing documents into `messages`.
 `tests/test_migrations.py` checks preservation of legacy Discord/document rows,
-foreign keys, repeatable migrations, legacy capture grouping, and rejection of
-modified checksums for already-applied migrations.
-The full discovery run completed all 23 tests successfully on 2026-09-29.
+foreign keys, repeatable migrations, legacy capture grouping, acceptance of
+recognized historical checksums, and rejection of unrecognized checksum
+changes. The full test suite completed all 27 tests successfully on
+2026-09-29.
 
 Search-index rebuilding is not yet covered: FTS indexing remains deferred and
 neither importer creates or updates an FTS index.
@@ -468,7 +509,7 @@ database was changed. After the live migration, `PRAGMA integrity_check`
 returned `ok`, `PRAGMA foreign_key_check` returned no violations, all listed
 document and chunk counts were preserved, and the migration ledger contained
 versions 1 through 11 at that point. The current regression tests pass against
-the version-14 migration chain.
+the version-15 migration chain.
 
 ## Current Limitations
 
@@ -482,17 +523,19 @@ Both `src/build_archive.py` and `src/document_parser.py` use shared
 chunks and detected entries remain children of `documents`; neither is stored
 in `messages`. Neither importer builds FTS.
 
-The live database remains at schema version 11. A temporary-copy upgrade check
-was blocked because recorded checksums differ from the current files for
-already-applied migrations 003–007, 009, and 011. No live database changes were
-made during that check. Resolve the migration-ledger drift before running either
-importer against that database. The live archive was not used for the pilot.
+The live database was at schema version 11 when the startup checksum issue was
+investigated. Its ledger contains recognized historical checksums for
+migrations 001, 003–009, and 011. The runner now accepts those exact values while
+continuing to reject unknown checksum changes. A temporary copy of the live
+database upgraded to schema version 15 with `PRAGMA quick_check` returning `ok`
+and no foreign-key violations. The live database was not modified during that
+verification; launching `migrate` or `gui` applies its pending migrations.
 
 Migration 011 uses SQLite's `ALTER TABLE ... RENAME TO` syntax rather than SQL
 Server's `EXEC sp_rename`; the SQL Server statement prevented fresh SQLite
 databases from applying the migration. The migration tests pass with the
 SQLite statement. Migration `.sql` files are SQLite-specific, so a SQL Server
 language-service warning about `RENAME` is not a SQLite runtime error. The
-isolated pilot was created after that correction; the existing live archive
-remains untouched and its checksum drift still needs resolution before imports.
+isolated pilot was created after that correction. Historical migration
+checksums are handled by the explicit compatibility list described above.
 FTS indexes and thread support remain deferred.

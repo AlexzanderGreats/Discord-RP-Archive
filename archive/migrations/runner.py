@@ -9,6 +9,17 @@ from types import ModuleType
 
 
 MIGRATIONS_PATH = Path(__file__).parent
+HISTORICAL_CHECKSUMS = {
+    1: frozenset({"25439f9cbd3bb2e571d275b8a7121a2e47e998d1b4abb1a61e93723eaf3b3aa5"}),
+    3: frozenset({"428335c8c0ea0453885a4aaf15bc8e346bb55413b6daa7058785ae0d23b21902"}),
+    4: frozenset({"b4a7e0e43226246f222e9f4b4961f5b8cca0a7096629f24101fd33be0ff5fda1"}),
+    5: frozenset({"38df8a147bef21404ca954bc1d8531457434bd56005970c3c0eb1c9d75099cc8"}),
+    6: frozenset({"eb6224738e7624bf7093fb4647ce53f832a0631f6fdf433415b7095260356d0f"}),
+    7: frozenset({"bf53b779fd55a97e03980999213b567b129a9a76853b200e562b88d58d20d3ac"}),
+    8: frozenset({"02e167915678775bd436dcf1859de2986fe37cefc2aa2a71e3a64f25a5bd0165"}),
+    9: frozenset({"379aa40e53ac9723a5f68f339f54c58bbfaa390148a4269fde69e0c0914b8e23"}),
+    11: frozenset({"01cfdf5d0b5629a6df276452f7e4baffffac35fb7334fe6df425a556452da4f3"}),
+}
 
 
 def _load_migration(path: Path) -> ModuleType:
@@ -63,7 +74,8 @@ def run_migrations(connection: sqlite3.Connection) -> int:
         name = path.stem[4:]
         if version in applied:
             row = applied[version]
-            if row["name"] != name or row["checksum"] != checksum:
+            accepted_checksums = {checksum, *HISTORICAL_CHECKSUMS.get(version, ())}
+            if row["name"] != name or row["checksum"] not in accepted_checksums:
                 raise RuntimeError(f"Applied migration {version:03d} does not match its recorded checksum")
 
     pending = [

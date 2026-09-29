@@ -113,6 +113,15 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "does not match its recorded checksum"):
             run_migrations(self.connection)
 
+    def test_known_historical_migration_checksum_is_accepted(self) -> None:
+        run_migrations(self.connection)
+        self.connection.execute(
+            "UPDATE schema_migrations SET checksum = ? WHERE version = 1",
+            ("25439f9cbd3bb2e571d275b8a7121a2e47e998d1b4abb1a61e93723eaf3b3aa5",),
+        )
+
+        self.assertEqual(run_migrations(self.connection), 15)
+
     def test_recaptures_preserve_observations_and_advance_accepted_capture(self) -> None:
         from archive.provenance import (
             accept_import_run,
