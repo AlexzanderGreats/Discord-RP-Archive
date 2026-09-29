@@ -1,0 +1,27 @@
+# Local environment
+.venv/
+__pycache__/
+*.py[cod]
+
+# Archive content, generated outputs, and private configuration
+00_Admin/
+01_Raw/
+02_Processed/
+03_Reader/
+04_Search/
+05_Backups/
+
+# SQLite databases and transient journal files
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Local editor and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

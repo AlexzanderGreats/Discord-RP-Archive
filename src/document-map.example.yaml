@@ -1,0 +1,10 @@
+documents:
+  - path: "01_Raw/TXTs/Renn & Winter.txt"
+    title: "Renn and Winter"
+    document_type: "rp_transcript"
+    status: "historical"
+
+  - path: "01_Raw/Elementals Remastered/Server Stuff/QI Class.txt"
+    title: "QI Class"
+    document_type: "reference"
+    status: "current"
