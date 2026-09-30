@@ -150,8 +150,15 @@ class ArchiveApp:
         ttk.Label(page, text="Question").pack(anchor="w")
         self.ask_question = tk.Text(page, height=4, wrap="word", padx=8, pady=6)
         self.ask_question.pack(fill="x", pady=(4, 8))
-        self.ask_button = ttk.Button(page, text="Ask archive", command=self._ask_archive)
-        self.ask_button.pack(anchor="w")
+        ask_actions = ttk.Frame(page)
+        ask_actions.pack(fill="x")
+        self.ask_button = ttk.Button(ask_actions, text="Ask archive", command=self._ask_archive)
+        self.ask_button.pack(side="left")
+        self.export_answer_button = ttk.Button(
+            ask_actions, text="Export test", command=self._export_answer, state="disabled"
+        )
+        self.export_answer_button.pack(side="left", padx=(8, 0))
+        self.last_answer_export: tuple[str, str, str, str] | None = None
         self.ask_status = ttk.Label(page, text="Answers are generated only from retrieved archive messages.", foreground="#58636d")
         self.ask_status.pack(anchor="w", pady=(8, 6))
 
@@ -167,6 +174,8 @@ class ArchiveApp:
         if not question:
             self.ask_status.configure(text="Enter a question first.")
             return
+        self.last_answer_export = None
+        self.export_answer_button.configure(state="disabled")
         try:
             evidence = self.answer_service.retrieve(question)
         except sqlite3.Error as exc:
@@ -186,9 +195,29 @@ class ArchiveApp:
         model = self.model_name.get().strip()
         self._run_background(
             lambda: self.ollama_client.generate(model, question, evidence),
-            lambda answer: self._finish_answer(answer, len(evidence)),
+            lambda answer: self._finish_answer(answer, question, model, len(evidence)),
             lambda error: self._finish_answer_error(error),
         )
+
+    def _export_answer(self) -> None:
+        if self.last_answer_export is None:
+            return
+        filename = filedialog.asksaveasfilename(
+            title="Export model test",
+            parent=self.root,
+            defaultextension=".txt",
+            filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
+            initialfile="archive-model-test.txt",
+        )
+        if not filename:
+            return
+        question, model, answer, evidence = self.last_answer_export
+        try:
+            Path(filename).write_text(
+                self._format_test_export(question, model, answer, evidence), encoding="utf-8"
+            )
+        except OSError as error:
+            messagebox.showerror("Export failed", str(error), parent=self.root)
 
     def _refresh_models(self) -> None:
         self.model_refresh.configure(state="disabled")
@@ -222,8 +251,11 @@ class ArchiveApp:
         Thread(target=run_task, daemon=True).start()
         self.root.after(80, poll)
 
-    def _finish_answer(self, answer: str, evidence_count: int) -> None:
+    def _finish_answer(self, answer: str, question: str, model: str, evidence_count: int) -> None:
         self._set_text(self.ask_answer, answer)
+        evidence = self.ask_evidence.get("1.0", "end").strip()
+        self.last_answer_export = (question, model, answer, evidence)
+        self.export_answer_button.configure(state="normal")
         self.ask_status.configure(text=f"Answer generated from {evidence_count} retrieved message(s).")
         self.ask_button.configure(state="normal")
 
@@ -246,6 +278,15 @@ class ArchiveApp:
         widget.delete("1.0", "end")
         widget.insert("1.0", value)
         widget.configure(state="disabled")
+
+    @staticmethod
+    def _format_test_export(question: str, model: str, answer: str, evidence: str) -> str:
+        return (
+            f"Model: {model or 'Not specified'}\n\n"
+            f"Question\n========\n{question}\n\n"
+            f"Answer\n======\n{answer}\n\n"
+            f"Retrieved evidence\n==================\n{evidence}\n"
+        )
 
     @classmethod
     def _format_evidence(cls, evidence: list[dict[str, Any]]) -> str:
