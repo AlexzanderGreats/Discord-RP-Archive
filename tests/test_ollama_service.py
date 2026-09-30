@@ -23,7 +23,9 @@ class OllamaServiceTests(unittest.TestCase):
         }]
 
         with patch("archive.ollama_service.urlopen", return_value=response) as open_url:
-            answer = OllamaClient().generate("test-model", "What did Winter find?", evidence)
+            answer, details = OllamaClient().generate_with_details(
+                "test-model", "What did Winter find?", evidence
+            )
 
         request = open_url.call_args.args[0]
         payload = json.loads(request.data)
@@ -32,6 +34,14 @@ class OllamaServiceTests(unittest.TestCase):
         self.assertIn('"reference": "E1"', payload["messages"][1]["content"])
         self.assertIn("capture.json", payload["messages"][1]["content"])
         self.assertIn("cite each factual claim", payload["messages"][0]["content"].casefold())
+        self.assertEqual(details.user_context, payload["messages"][1]["content"])
+        self.assertEqual(details.system_instructions, payload["messages"][0]["content"])
+        self.assertEqual(details.model, payload["model"])
+        self.assertEqual(details.settings, {
+            "temperature": payload["options"]["temperature"],
+            "context": "default (Ollama; num_ctx not sent)",
+            "max tokens": "default (Ollama; num_predict not sent)",
+        })
 
     def test_answer_does_not_call_model_without_retrieved_evidence(self) -> None:
         search = MagicMock()

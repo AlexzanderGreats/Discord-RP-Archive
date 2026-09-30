@@ -447,10 +447,19 @@ Home, Search, Reader, and Ask are the current GUI surfaces. Search uses
 `SearchService`; double-clicking a result opens its surrounding channel context
 through `ReaderService`. Ask retrieves current Discord messages with
 `search_relevant()` and sends only those messages, with source metadata, to the
-local Ollama chat API. The answer is displayed beside the retrieved evidence;
-if retrieval finds nothing, Ollama is not called. The model is instructed to
-cite evidence references, but generated citations are not independently
-validated. This is keyword retrieval, not semantic or document retrieval.
+local Ollama chat API. The Answer view displays the response and retrieved
+evidence. The LLM Diagnostics view shows the ranked retrieval results (source,
+date, and relevance score), the exact user-message context and system
+instructions sent to Ollama, the selected model, request settings, and the
+answer. The context shown includes the question and the JSON evidence payload;
+each message's content is truncated to 1,500 characters before being sent.
+Temperature is set to `0.2`; context size (`num_ctx`) and max output tokens
+(`num_predict`) are not sent, so Ollama uses its defaults. **Export test** saves
+the diagnostics and answer as a `.txt` file and becomes available after an
+answer is generated. If retrieval finds nothing, Ollama is not called. The
+model is instructed to cite evidence references, but generated citations are
+not independently validated. This is keyword retrieval, not semantic or
+document retrieval.
 
 Ollama Q&A uses the local endpoint `http://127.0.0.1:11434` by default and adds
 no Python package dependencies. Ensure Ollama is running and a model is

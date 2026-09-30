@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from archive.reader_service import ReaderService
-from archive.ollama_service import ArchiveAnswerService, OllamaClient
+from archive.ollama_service import ArchiveAnswerService, OllamaClient, OllamaRequestDetails
 from archive.search_service import SearchService
 from archive.sync_service import StartupSyncReport, synchronize_archive
 
@@ -158,16 +158,28 @@ class ArchiveApp:
             ask_actions, text="Export test", command=self._export_answer, state="disabled"
         )
         self.export_answer_button.pack(side="left", padx=(8, 0))
-        self.last_answer_export: tuple[str, str, str, str] | None = None
+        self.last_answer_export: str | None = None
         self.ask_status = ttk.Label(page, text="Answers are generated only from retrieved archive messages.", foreground="#58636d")
         self.ask_status.pack(anchor="w", pady=(8, 6))
 
-        ttk.Label(page, text="Answer", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.ask_answer = tk.Text(page, height=10, wrap="word", state="disabled", padx=10, pady=8)
+        self.ask_result_pages = ttk.Notebook(page)
+        self.ask_result_pages.pack(fill="both", expand=True, pady=(4, 0))
+        response_page = ttk.Frame(self.ask_result_pages, padding=8)
+        self.ask_result_pages.add(response_page, text="Answer")
+        ttk.Label(response_page, text="Model answer", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.ask_answer = tk.Text(response_page, height=8, wrap="word", state="disabled", padx=10, pady=8)
         self.ask_answer.pack(fill="both", expand=True, pady=(4, 8))
-        ttk.Label(page, text="Retrieved evidence", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.ask_evidence = tk.Text(page, height=8, wrap="word", state="disabled", padx=10, pady=8)
+        ttk.Label(response_page, text="Retrieved evidence", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.ask_evidence = tk.Text(response_page, height=7, wrap="word", state="disabled", padx=10, pady=8)
         self.ask_evidence.pack(fill="both", expand=True, pady=(4, 0))
+
+        diagnostics_page = ttk.Frame(self.ask_result_pages, padding=8)
+        self.ask_result_pages.add(diagnostics_page, text="LLM Diagnostics")
+        self.ask_diagnostics = tk.Text(diagnostics_page, wrap="word", state="disabled", padx=10, pady=8)
+        diagnostics_scrollbar = ttk.Scrollbar(diagnostics_page, orient="vertical", command=self.ask_diagnostics.yview)
+        self.ask_diagnostics.configure(yscrollcommand=diagnostics_scrollbar.set)
+        self.ask_diagnostics.pack(side="left", fill="both", expand=True)
+        diagnostics_scrollbar.pack(side="right", fill="y")
 
     def _ask_archive(self) -> None:
         question = self.ask_question.get("1.0", "end").strip()
@@ -185,6 +197,7 @@ class ArchiveApp:
         self._set_text(self.ask_answer, "")
         if not evidence:
             self._set_text(self.ask_evidence, "")
+            self._set_text(self.ask_diagnostics, "")
             self._set_text(self.ask_answer, "No matching archive evidence was found; no model answer was generated.")
             self.ask_status.configure(text="No evidence matched this question.")
             return
@@ -194,8 +207,8 @@ class ArchiveApp:
         self.ask_status.configure(text="Asking Ollama...")
         model = self.model_name.get().strip()
         self._run_background(
-            lambda: self.ollama_client.generate(model, question, evidence),
-            lambda answer: self._finish_answer(answer, question, model, len(evidence)),
+            lambda: self.ollama_client.generate_with_details(model, question, evidence),
+            lambda result: self._finish_answer(result[0], question, evidence, result[1]),
             lambda error: self._finish_answer_error(error),
         )
 
@@ -211,11 +224,8 @@ class ArchiveApp:
         )
         if not filename:
             return
-        question, model, answer, evidence = self.last_answer_export
         try:
-            Path(filename).write_text(
-                self._format_test_export(question, model, answer, evidence), encoding="utf-8"
-            )
+            Path(filename).write_text(self.last_answer_export, encoding="utf-8")
         except OSError as error:
             messagebox.showerror("Export failed", str(error), parent=self.root)
 
@@ -251,12 +261,19 @@ class ArchiveApp:
         Thread(target=run_task, daemon=True).start()
         self.root.after(80, poll)
 
-    def _finish_answer(self, answer: str, question: str, model: str, evidence_count: int) -> None:
+    def _finish_answer(
+        self,
+        answer: str,
+        question: str,
+        evidence: list[dict[str, Any]],
+        details: OllamaRequestDetails,
+    ) -> None:
         self._set_text(self.ask_answer, answer)
-        evidence = self.ask_evidence.get("1.0", "end").strip()
-        self.last_answer_export = (question, model, answer, evidence)
+        report = self._format_test_export(question, answer, evidence, details)
+        self._set_text(self.ask_diagnostics, report)
+        self.last_answer_export = report
         self.export_answer_button.configure(state="normal")
-        self.ask_status.configure(text=f"Answer generated from {evidence_count} retrieved message(s).")
+        self.ask_status.configure(text=f"Answer generated from {len(evidence)} retrieved message(s).")
         self.ask_button.configure(state="normal")
 
     def _finish_answer_error(self, error: Exception) -> None:
@@ -280,12 +297,30 @@ class ArchiveApp:
         widget.configure(state="disabled")
 
     @staticmethod
-    def _format_test_export(question: str, model: str, answer: str, evidence: str) -> str:
+    def _format_test_export(
+        question: str,
+        answer: str,
+        evidence: list[dict[str, Any]],
+        details: OllamaRequestDetails,
+    ) -> str:
+        retrieval = []
+        for index, item in enumerate(evidence, start=1):
+            retrieval.append(
+                f"Result #{index}\n"
+                f"Source: {item.get('source_path') or 'Unknown source'}\n"
+                f"Date: {item.get('timestamp_utc') or 'Unknown date'}\n"
+                f"Score: {item.get('relevance_score', 'N/A')}"
+            )
+        settings = "\n".join(f"{name}: {value}" for name, value in details.settings.items())
+        retrieval_text = "\n\n".join(retrieval) or "No results"
         return (
-            f"Model: {model or 'Not specified'}\n\n"
-            f"Question\n========\n{question}\n\n"
-            f"Answer\n======\n{answer}\n\n"
-            f"Retrieved evidence\n==================\n{evidence}\n"
+            f"USER QUESTION\n----------------------------\n{question}\n\n"
+            f"RETRIEVAL\n----------------------------\n{retrieval_text}\n\n"
+            f"LLM CONTEXT\n----------------------------\n{details.user_context}\n\n"
+            f"SYSTEM INSTRUCTIONS\n----------------------------\n{details.system_instructions}\n\n"
+            f"MODEL\n----------------------------\n{details.model}\n\n"
+            f"SETTINGS\n----------------------------\n{settings}\n\n"
+            f"ANSWER\n----------------------------\n{answer}\n"
         )
 
     @classmethod
