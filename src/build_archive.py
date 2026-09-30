@@ -33,6 +33,50 @@ DATABASE_PATH = PROCESSED_ROOT / "archive.sqlite3"
 MANIFEST_PATH = PROCESSED_ROOT / "import-manifest.json"
 
 
+def manifest_path_for_database(database_path: Path) -> Path:
+    """Keep the default manifest location and colocate custom-database manifests."""
+    if database_path.resolve() == DATABASE_PATH.resolve():
+        return MANIFEST_PATH
+    return database_path.with_name(f"{database_path.stem}-import-manifest.json")
+
+
+def merge_manifest_results(
+    manifest_path: Path,
+    new_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retain prior source results while refreshing identical captures."""
+    merged: list[dict[str, Any]] = []
+    if manifest_path.exists():
+        with manifest_path.open("r", encoding="utf-8") as file:
+            previous_manifest = json.load(file)
+        if isinstance(previous_manifest, dict) and isinstance(previous_manifest.get("results"), list):
+            merged.extend(
+                result
+                for result in previous_manifest["results"]
+                if isinstance(result, dict)
+            )
+
+    positions: dict[tuple[str, str], int] = {}
+    for index, result in enumerate(merged):
+        file_path = result.get("file")
+        source_hash = result.get("sha256")
+        if file_path and source_hash:
+            positions[(str(file_path).casefold(), str(source_hash).casefold())] = index
+
+    for result in new_results:
+        file_path = result.get("file")
+        source_hash = result.get("sha256")
+        key = (str(file_path).casefold(), str(source_hash).casefold()) if file_path and source_hash else None
+        if key is not None and key in positions:
+            merged[positions[key]] = result
+        else:
+            if key is not None:
+                positions[key] = len(merged)
+            merged.append(result)
+
+    return merged
+
+
 @dataclass
 class NormalizedMessage:
     message_id: str | None
@@ -1275,6 +1319,8 @@ def main() -> int:
     if not database_path.is_absolute():
         database_path = ARCHIVE_ROOT / database_path
 
+    manifest_path = manifest_path_for_database(database_path)
+
     server_map_path = args.server_map
     if server_map_path is not None and not server_map_path.is_absolute():
         server_map_path = ARCHIVE_ROOT / server_map_path
@@ -1324,6 +1370,7 @@ def main() -> int:
                 )
                 print(f"  {exc}")
 
+        manifest_results = merge_manifest_results(manifest_path, results)
         manifest = {
             "generated_at_utc":
                 datetime.now(timezone.utc).isoformat(),
@@ -1333,12 +1380,12 @@ def main() -> int:
                 if database_path.is_relative_to(ARCHIVE_ROOT)
                 else str(database_path),
 
-            "files_processed": len(results),
+            "files_processed": len(manifest_results),
 
-            "results": results,
+            "results": manifest_results,
         }
 
-        with MANIFEST_PATH.open(
+        with manifest_path.open(
             "w",
             encoding="utf-8",
         ) as file:
@@ -1365,7 +1412,7 @@ def main() -> int:
         print(f"Import runs:           {total_imports}")
         print(f"Observations:          {total_messages}")
         print(f"Database:              {database_path}")
-        print(f"Manifest:              {MANIFEST_PATH}")
+        print(f"Manifest:              {manifest_path}")
 
     finally:
         connection.close()

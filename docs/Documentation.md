@@ -334,6 +334,12 @@ Run the importer with an optional JSON file or directory; by default it scans
 .\.venv\Scripts\python.exe src\build_archive.py [path] --database 02_Processed\archive.sqlite3
 ```
 
+The default database writes `02_Processed/import-manifest.json`. When
+`--database` points to a different database, the manifest is written beside it
+with the database name and `-import-manifest.json` suffix. Existing manifest
+results are retained by source path and hash; reimporting the same capture
+refreshes its result instead of duplicating it.
+
 ## Document Importer
 
 `src/document_parser.py` handles TXT, PDF, and DOCX files independently from the

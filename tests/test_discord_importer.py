@@ -7,7 +7,14 @@ import unittest
 from pathlib import Path
 
 from archive.provenance import current_accepted_source_id
-from src.build_archive import create_database, import_file
+from src.build_archive import (
+    DATABASE_PATH,
+    MANIFEST_PATH,
+    create_database,
+    import_file,
+    merge_manifest_results,
+    manifest_path_for_database,
+)
 
 
 class DiscordImporterTests(unittest.TestCase):
@@ -49,6 +56,29 @@ class DiscordImporterTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+
+    def test_manifest_path_follows_custom_database(self) -> None:
+        custom_database = self.root / "acknowledgment-original.sqlite3"
+
+        self.assertEqual(manifest_path_for_database(DATABASE_PATH), MANIFEST_PATH)
+        self.assertEqual(
+            manifest_path_for_database(custom_database),
+            self.root / "acknowledgment-original-import-manifest.json",
+        )
+
+    def test_manifest_results_merge_by_path_and_hash(self) -> None:
+        manifest_path = self.root / "manifest.json"
+        previous = {"file": "old.json", "sha256": "old-hash", "status": "succeeded"}
+        manifest_path.write_text(
+            json.dumps({"results": [previous]}),
+            encoding="utf-8",
+        )
+        refreshed = {"file": "old.json", "sha256": "old-hash", "status": "partial"}
+        added = {"file": "new.json", "sha256": "new-hash", "status": "succeeded"}
+
+        merged = merge_manifest_results(manifest_path, [refreshed, added])
+
+        self.assertEqual(merged, [refreshed, added])
 
     def test_recapture_preserves_changed_message_and_rejects_invalid_capture(self) -> None:
         self._write_export("Hello")
