@@ -22,8 +22,9 @@ class GuiExportTests(unittest.TestCase):
                 system_instructions="Use only the supplied evidence.",
                 settings={
                     "temperature": 0.2,
+                    "thinking": "disabled (think=false)",
                     "context": "default (Ollama; num_ctx not sent)",
-                    "max tokens": "default (Ollama; num_predict not sent)",
+                    "max tokens": 384,
                 },
             ),
         )
@@ -38,8 +39,9 @@ class GuiExportTests(unittest.TestCase):
         self.assertIn("SYSTEM INSTRUCTIONS", report)
         self.assertIn("MODEL\n----------------------------\ntest-model", report)
         self.assertIn("temperature: 0.2", report)
+        self.assertIn("thinking: disabled (think=false)", report)
         self.assertIn("num_ctx not sent", report)
-        self.assertIn("num_predict not sent", report)
+        self.assertIn("max tokens: 384", report)
         self.assertIn("Winter found a compass.", report)
 
 

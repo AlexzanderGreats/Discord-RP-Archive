@@ -31,16 +31,22 @@ class OllamaServiceTests(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertEqual(request.full_url, "http://127.0.0.1:11434/api/chat")
         self.assertEqual(answer, "Winter found it [E1].")
+        self.assertFalse(payload["think"])
+        self.assertEqual(payload["options"]["num_predict"], 384)
         self.assertIn('"reference": "E1"', payload["messages"][1]["content"])
+        self.assertIn('"relation": "query match"', payload["messages"][1]["content"])
         self.assertIn("capture.json", payload["messages"][1]["content"])
         self.assertIn("cite each factual claim", payload["messages"][0]["content"].casefold())
+        self.assertIn("concise paragraph, usually 2-5 sentences", payload["messages"][0]["content"])
+        self.assertIn("Do not combine separate encounters", payload["messages"][0]["content"])
         self.assertEqual(details.user_context, payload["messages"][1]["content"])
         self.assertEqual(details.system_instructions, payload["messages"][0]["content"])
         self.assertEqual(details.model, payload["model"])
         self.assertEqual(details.settings, {
             "temperature": payload["options"]["temperature"],
+            "thinking": "disabled (think=false)",
             "context": "default (Ollama; num_ctx not sent)",
-            "max tokens": "default (Ollama; num_predict not sent)",
+            "max tokens": 384,
         })
 
     def test_answer_does_not_call_model_without_retrieved_evidence(self) -> None:

@@ -453,13 +453,20 @@ date, and relevance score), the exact user-message context and system
 instructions sent to Ollama, the selected model, request settings, and the
 answer. The context shown includes the question and the JSON evidence payload;
 each message's content is truncated to 1,500 characters before being sent.
-Temperature is set to `0.2`; context size (`num_ctx`) and max output tokens
-(`num_predict`) are not sent, so Ollama uses its defaults. **Export test** saves
-the diagnostics and answer as a `.txt` file and becomes available after an
-answer is generated. If retrieval finds nothing, Ollama is not called. The
-model is instructed to cite evidence references, but generated citations are
-not independently validated. This is keyword retrieval, not semantic or
-document retrieval.
+Retrieval ranks rare and capitalized query terms more heavily, favors the
+channel with the strongest cluster of matches, and includes the previous message
+and up to five following messages around its best hit. These adjacent messages
+are labeled in the evidence view.
+Thinking is disabled (`think: false`) so reasoning tokens do not crowd out
+the answer. Answers are requested as concise paragraphs, usually 2-5 sentences,
+with a maximum of 384 output tokens. Temperature is set to `0.2`; context size (`num_ctx`) is not
+sent, so Ollama uses its default. Retrieval weights rare query terms more
+heavily than common ones.
+**Export test** saves the diagnostics and answer as a `.txt` file and becomes
+available after an answer is generated. If retrieval finds nothing, Ollama is
+not called. The model is instructed to cite evidence references, but generated
+citations are not independently validated. This is keyword retrieval, not
+semantic or document retrieval.
 
 Ollama Q&A uses the local endpoint `http://127.0.0.1:11434` by default and adds
 no Python package dependencies. Ensure Ollama is running and a model is

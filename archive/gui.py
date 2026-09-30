@@ -328,11 +328,13 @@ class ArchiveApp:
         blocks = []
         for index, item in enumerate(evidence, start=1):
             author = cls._author(item)
+            relation = item.get("context_relation")
+            label = f" [{relation}]" if relation else ""
             header = " | ".join(
                 value for value in (item.get("timestamp_utc"), item.get("channel_name"), author) if value
             )
             blocks.append(
-                f"[E{index}] {header}\nSource: {item.get('source_path') or 'Unknown source'}\n"
+                f"[E{index}]{label} {header}\nSource: {item.get('source_path') or 'Unknown source'}\n"
                 f"{item.get('content_original') or ''}"
             )
         return "\n\n".join(blocks)

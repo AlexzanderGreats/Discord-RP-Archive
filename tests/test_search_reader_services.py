@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from archive.ollama_service import ArchiveAnswerService
 from archive.reader_service import ReaderService
 from archive.search_service import SearchService
 from src.build_archive import create_database, import_file
@@ -63,7 +64,29 @@ class SearchReaderServiceTests(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["content_original"], "A silver compass")
-        self.assertEqual(result[0]["relevance_score"], 2)
+        self.assertGreater(result[0]["relevance_score"], 0)
+
+    def test_relevant_search_prioritizes_rare_question_terms(self) -> None:
+        result = self.search_service.search_relevant("scene compass")
+
+        self.assertEqual(result[0]["content_original"], "A silver compass")
+        self.assertGreater(result[0]["relevance_score"], result[1]["relevance_score"])
+
+    def test_relevant_search_ignores_question_filler_for_specific_names(self) -> None:
+        self._write_export([
+            {"id": "generic", "timestamp": "2026-01-01T00:00:00Z",
+             "content": "According to the archive, what happened immediately after the fight with the emperor?"},
+            {"id": "specific", "timestamp": "2026-01-01T00:01:00Z",
+             "content": "Winter and Dravum met."},
+        ])
+        import_file(self.connection, self.export_path)
+
+        result = self.search_service.search_relevant(
+            "According to the archive, what happened immediately after Winter's fight "
+            "with Dravum, the Emperor of the Unwritten?"
+        )
+
+        self.assertEqual(result[0]["discord_message_id"], "specific")
 
     def test_relevant_search_returns_empty_when_no_search_terms_remain(self) -> None:
         self.assertEqual(self.search_service.search_relevant("Who is it?"), [])
@@ -78,6 +101,17 @@ class SearchReaderServiceTests(unittest.TestCase):
         self.assertEqual(context["message"]["discord_message_id"], "two")
         self.assertEqual([row["discord_message_id"] for row in context["before"]], ["one"])
         self.assertEqual([row["discord_message_id"] for row in context["after"]], ["three"])
+
+    def test_answer_retrieval_includes_adjacent_messages(self) -> None:
+        answer_service = ArchiveAnswerService(self.search_service, None)
+
+        evidence = answer_service.retrieve("silver compass", limit=1)
+
+        self.assertEqual([item["discord_message_id"] for item in evidence], ["one", "two", "three"])
+        self.assertEqual(
+            [item["context_relation"] for item in evidence],
+            ["adjacent before", "query match", "adjacent after"],
+        )
 
     def test_recapture_hides_superseded_observations(self) -> None:
         self._write_export(
