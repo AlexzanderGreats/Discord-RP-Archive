@@ -185,6 +185,34 @@ across 171,306 adjacent pairs, but those pairs cross independent channel
 captures; channel-change weights should therefore be considered only within a
 caller-defined interaction scope.
 
+## Candidate Segmentation (Implemented)
+
+`archive/segmentation.py` generates deterministic draft spans within exactly
+one `(server_id, channel_id, source_id)` scope. Messages missing any scope
+field are retained in singleton spans rather than combined under an unknown
+scope. Messages sort within scope by timestamp then observation ID; rows
+without timestamps sort afterward by observation ID.
+`archive/segmentation_persistence.py` loads current accepted source captures
+and only the latest accepted import for each capture, with optional
+server/channel/source filters.
+
+Segmentation does not equate a Phase C `strong_candidate` with a split. A hard
+Phase C boundary splits deterministically; otherwise a gap at least
+`inactivity_gap_seconds` (defaulting to the measured Phase C p95 of 4,443.177
+seconds) starts a new draft span unless the incoming message directly replies
+to a prior in-scope member. Reply evidence cannot negate a hard boundary.
+Cross-scope replies are persisted as links only and never combine
+memberships. Every scoped adjacent pair records its split/no-split decision
+and any Phase C evidence supplied for that transition.
+
+Migration 017 stores segmentation runs, `candidate_spans`,
+`candidate_span_messages`, `candidate_reply_links`, and
+`segmentation_boundary_decisions`. Automatic assignments have `candidate`
+status; none of these records creates or edits `scenes` or `scene_messages`.
+The initial segmenter creates a non-overlapping time partition per scope. It
+cannot infer parallel overlapping scenes from current evidence; uncertain
+participants or interactions remain unassigned.
+
 ## Scene Curation (Implemented)
 
 Scenes and arcs are curated in `scenes.py`. `scene_messages` is the explicit,

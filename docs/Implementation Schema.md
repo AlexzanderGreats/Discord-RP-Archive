@@ -25,6 +25,11 @@ scene_participants
 boundary_detection_runs
 boundary_detection_run_messages
 event_boundary_candidates
+segmentation_runs
+candidate_spans
+candidate_span_messages
+candidate_reply_links
+segmentation_boundary_decisions
 documents
 document_chunks
 document_entries
@@ -32,12 +37,17 @@ schema_migrations
 ```
 
 This is the migration-backed schema used by both the Discord JSON and document
-importers (version 016). The checked-in live database may still be at version
-015 and requires an explicit migration run before it can use boundary persistence.
+importers (version 017). The checked-in live database may still be at version
+015 and requires explicit migrations before it can use boundary persistence or
+candidate segmentation.
 
 Migration 016 adds versioned boundary detection runs and candidate results.
 These are separate from the curated `scenes` and `scene_messages` tables; no
 candidate message membership is stored in curated scene data.
+
+Migration 017 adds versioned segmentation runs, draft spans, explicit candidate
+memberships, reply links, and boundary-decision evidence. These structures also
+remain separate from curated scenes and memberships.
 
 Scene curation is implemented in migration 015. Scene membership is explicit
 and ordered through `scene_messages`; `scene_channels` is a view of the distinct
@@ -537,6 +547,31 @@ were classified as `none`.
 
 `UNIQUE(detection_run_id, message_observation_id)` prohibits duplicate
 observations in a run; `CHECK(position >= 0)` preserves valid sequence positions.
+
+## Segmentation candidate tables
+
+Migration 017 introduces:
+
+- `segmentation_runs`: algorithm/configuration version, supplied scope,
+  fingerprint, optional boundary-detection run, status, and statistics.
+- `candidate_spans`: ordered draft span headers scoped to server, channel, and
+  source capture. Missing scope metadata is allowed only for conservative
+  singleton spans. These are not curated or confirmed scenes.
+- `candidate_span_messages`: explicit ordered membership with `automatic` or
+  `manual` method and `candidate`, `confirmed`, or `rejected` status. Phase D
+  creates automatic candidate memberships only.
+- `candidate_reply_links`: reply source, target-observation IDs, resolution,
+  and same-scope indicator. A cross-channel reply remains a link and does not
+  join candidate memberships.
+- `segmentation_boundary_decisions`: one row per adjacent transition in a
+  scope, retaining whether a split occurred, the split reason, and serialized
+  Phase C candidate evidence when available.
+
+No foreign key or trigger links these records to curated `scenes` or
+`scene_messages`. The initial automatic segmenter writes a non-overlapping
+time partition within a scope. The membership schema itself does not enforce
+one span per message, leaving later reviewed reconstruction room to represent
+ambiguity or overlapping interactions without changing curated scene data.
 
 ## Relationship Summary
 
