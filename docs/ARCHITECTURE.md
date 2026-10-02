@@ -90,6 +90,101 @@ The target tables are introduced incrementally, with the existing `imports`,
 `messages`, `documents`, `document_chunks`, and `document_entries` tables
 serving as the initial migration surface.
 
+## Signal Extraction (Implemented)
+
+`archive/signals.py` extracts deterministic evidence from chronologically
+ordered message-observation mappings. It is a pure analysis module: it does not
+read or write SQLite, alter scene curation or attribution, assign scores, or
+decide whether a boundary should be accepted. Each result identifies its
+signal type, source observation IDs, observed value, evidence, and whether the
+evidence is explicit or heuristic.
+
+Supported observations include normalized timestamp gaps, timestamp
+availability/validity, channel and raw-author changes, reply relationships,
+source/import collection changes, exact scene-control marker lines
+(`[[SCENE START]]`, `[[SCENE END]]`, `[[SCENE BREAK]]`, `[[TIME SKIP]]`,
+`[[TRANSITION]]`), header bracketed speaker labels, line-start `OOC:` or
+`(OOC)` markers, and labeled `Location:`, `Setting:`, or `Time:` lines.
+The importer does not enforce a shared marker convention; these exact tokens
+are recognized as text patterns, not as verified archive-wide semantics.
+Speaker labels are not resolved to characters, and narrative labels are not
+treated as scene boundaries. Contradictory evidence is returned separately
+rather than suppressed.
+
+Signal extraction cannot currently establish natural-language location or
+action transitions, character participation/composition, Discord thread
+membership, arbitrary message references outside the normalized reply field,
+or reply targets absent from the supplied observations. The
+messages schema has no `thread_id`; `thread_name` is not persisted as a
+column. A thread change is emitted only when per-message `source_json`
+explicitly includes `thread_id`/`threadId` or `thread_name`/`threadName`.
+Channel IDs available on message observations are local normalized foreign
+keys, not original channel IDs. Collection changes are reported only when
+`source_id` or `import_id` is included in the supplied records.
+
+## Boundary Candidates (Implemented)
+
+`archive/boundaries.py` consumes Phase B signals and scores each adjacent pair
+in an explicitly ordered observation sequence. It rejects backwards known
+timestamps and requires ties to be ordered by observation ID; callers must
+scope and order the input deliberately (for example, by one channel capture).
+It does not sort records, create scenes, or assign message membership.
+
+The initial `event_boundaries_v1` ruleset classifies `scene_start` before its
+message and `scene_end` after its message as hard boundaries. `scene_break`,
+`time_skip`, and `transition` markers are hard before the marked message.
+A source-capture (`source_id`) change is also hard; an import-run (`import_id`)
+change alone is not, since re-importing one capture is not itself an event
+boundary. Hard status takes precedence over the numeric classification while
+supporting and contradictory evidence still contributes to the recorded raw
+score.
+
+Soft weights are: timestamp gap 0.25, channel change 0.20, narrative context
+transition 0.25, author change 0.10, speaker-label change 0.10, thread change
+0.15, and a resolved direct reply across the pair -0.30. Hard marker and source
+capture change weights are 1.0. Reply evidence is contradictory; positive
+contributions are supporting evidence. Every contribution records strength,
+weight, value, source observations, classification, and evidence. Raw score
+is `sum(weight * normalized_strength)` and is an uncalibrated operational
+score, not a probability.
+
+Timestamp strength is `min(max(gap_seconds, 0) / 4443.177, 1)`. The reference
+is the observed 95th percentile gap (4,443.177 seconds) among 170,847
+non-negative adjacent timestamp gaps in current accepted channel captures;
+the archive sample had 171,307 messages across 460 channels. Initial
+classification thresholds are 0.35 for `soft_candidate` and 0.65 for
+`strong_candidate`; hard evidence yields `hard_candidate` regardless of
+counterevidence. These weights and thresholds are initial engineering values,
+not empirically calibrated.
+
+The read/write entry point `archive/boundary_persistence.py` stores one
+versioned run and only non-`none` candidates. Migration 016 adds
+`boundary_detection_runs`, `boundary_detection_run_messages`, and
+`event_boundary_candidates`, separate from curated `scenes` and
+`scene_messages`. Candidate rows retain supporting,
+contradictory, and full contribution JSON and start with `pending` review
+status; this phase adds no review workflow. The run records canonical config,
+config hash, supplied input scope, input fingerprint, timestamps, status, and
+summary counts. `boundary_detection_run_messages` retains every ordered input
+observation, including transitions classified as `none`. Candidate persistence
+is protected by a savepoint, and
+analysis errors are recorded as failed runs and re-raised.
+
+Archive observations relevant to the initial rules: 11,442 current accepted
+messages (6.68%) contain a reply reference; the recognized explicit scene
+marker patterns occurred zero times; two messages began with bracketed
+speaker-like labels; leading OOC markers occurred zero times. Adjacent
+author-identity changes within the 460 channel captures occurred 56,917 times.
+One labeled narrative-context marker was present, with no differing labeled
+context transitions.
+There were no speaker-marker changes or differing labeled-context transitions.
+The timestamp-gap percentiles were p25 11.266 s, p50
+38.868 s, p75 138.427 s, p90 708.495 s, p95 4,443.177 s, and p99
+345,047.941 s. A global timestamp ordering yielded 25,456 channel changes
+across 171,306 adjacent pairs, but those pairs cross independent channel
+captures; channel-change weights should therefore be considered only within a
+caller-defined interaction scope.
+
 ## Scene Curation (Implemented)
 
 Scenes and arcs are curated in `scenes.py`. `scene_messages` is the explicit,

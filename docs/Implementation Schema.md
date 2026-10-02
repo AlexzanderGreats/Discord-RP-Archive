@@ -22,15 +22,22 @@ arcs
 scenes
 scene_messages
 scene_participants
+boundary_detection_runs
+boundary_detection_run_messages
+event_boundary_candidates
 documents
 document_chunks
 document_entries
 schema_migrations
 ```
 
-This is the migration-backed target schema used by both the Discord JSON and
-document importers. The live database may require migration-ledger reconciliation
-before it can be upgraded to the current version.
+This is the migration-backed schema used by both the Discord JSON and document
+importers (version 016). The checked-in live database may still be at version
+015 and requires an explicit migration run before it can use boundary persistence.
+
+Migration 016 adds versioned boundary detection runs and candidate results.
+These are separate from the curated `scenes` and `scene_messages` tables; no
+candidate message membership is stored in curated scene data.
 
 Scene curation is implemented in migration 015. Scene membership is explicit
 and ordered through `scene_messages`; `scene_channels` is a view of the distinct
@@ -464,6 +471,73 @@ The migration ledger records only successful application. Failed migration
 attempt details belong in application logs; this first slice does not add a
 separate migration-attempt table.
 
+## `boundary_detection_runs`
+
+One record per deterministic boundary analysis execution.
+
+| Column | SQLite type | Nullable? | Primary key? | Foreign key? | Unique? | Index? |
+| --- | --- | ---: | ---: | --- | ---: | --- |
+| `detection_run_id` | `INTEGER` | N | Y | — | — | PK |
+| `run_type` | `TEXT` | N | N | — | — | — |
+| `algorithm_version` | `TEXT` | N | N | — | N | `ix_boundary_detection_runs_algorithm` |
+| `configuration_json` | `TEXT` | N | N | — | N | — |
+| `configuration_sha256` | `TEXT` | N | N | — | N | — |
+| `input_scope_json` | `TEXT` | N | N | — | N | — |
+| `input_fingerprint` | `TEXT` | N | N | — | N | `ix_boundary_detection_runs_fingerprint` |
+| `started_at` | `TEXT` | N | N | — | N | `ix_boundary_detection_runs_status` |
+| `completed_at` | `TEXT` | Y | N | — | N | — |
+| `status` | `TEXT` | N | N | — | N | `ix_boundary_detection_runs_status` |
+| `statistics_json` | `TEXT` | N | N | — | N | — |
+| `error_details` | `TEXT` | Y | N | — | N | — |
+
+`run_type` is `full` or `incremental`. `status` is `running`, `completed`, or
+`failed`, with consistency checks for completion time and error details. The
+configuration and hash preserve the exact ruleset used; the input fingerprint
+is calculated from ordered observations and extracted signals.
+
+## `event_boundary_candidates`
+
+One candidate transition, per run, between adjacent message observations. Rows
+are created only for non-`none` classifications; run statistics count all
+evaluated transitions.
+
+| Column | SQLite type | Nullable? | Primary key? | Foreign key? | Unique? | Index? |
+| --- | --- | ---: | ---: | --- | ---: | --- |
+| `boundary_candidate_id` | `INTEGER` | N | Y | — | — | PK |
+| `detection_run_id` | `INTEGER` | N | N | `boundary_detection_runs.detection_run_id` | Composite with pair | `ix_event_boundary_candidates_run` |
+| `left_message_observation_id` | `INTEGER` | N | N | `messages.message_observation_id` | Composite with run/right | `ix_event_boundary_candidates_pair` |
+| `right_message_observation_id` | `INTEGER` | N | N | `messages.message_observation_id` | Composite with run/left | `ix_event_boundary_candidates_pair` |
+| `boundary_type` | `TEXT` | N | N | — | N | — |
+| `raw_score` | `REAL` | N | N | — | N | — |
+| `classification` | `TEXT` | N | N | — | N | `ix_event_boundary_candidates_run` |
+| `supporting_evidence_json` | `TEXT` | N | N | — | N | — |
+| `contradictory_evidence_json` | `TEXT` | N | N | — | N | — |
+| `contributions_json` | `TEXT` | N | N | — | N | — |
+| `review_status` | `TEXT` | N | N | — | N | `ix_event_boundary_candidates_review` |
+| `created_at` | `TEXT` | N | N | — | N | `ix_event_boundary_candidates_review` |
+
+`boundary_type` is `hard` or `soft`; `classification` is `soft_candidate`,
+`strong_candidate`, or `hard_candidate`. `review_status` is initialized to
+`pending` and reserves `accepted`, `rejected`, and `deferred` for future
+review tooling. A unique `(detection_run_id, left_message_observation_id,
+right_message_observation_id)` key prevents duplicate transitions within a
+run. None of the boundary tables references or writes curated scenes.
+
+## `boundary_detection_run_messages`
+
+Ordered observations included in a detection run. This records the run's exact
+input message set and ordering, including messages whose adjacent transitions
+were classified as `none`.
+
+| Column | SQLite type | Nullable? | Primary key? | Foreign key? | Unique? | Index? |
+| --- | --- | ---: | ---: | --- | ---: | --- |
+| `detection_run_id` | `INTEGER` | N | Composite PK | `boundary_detection_runs.detection_run_id` | Composite with position/message | PK |
+| `position` | `INTEGER` | N | Composite PK | — | Composite with run | PK |
+| `message_observation_id` | `INTEGER` | N | N | `messages.message_observation_id` | Composite with run | `ix_boundary_detection_run_messages_message` |
+
+`UNIQUE(detection_run_id, message_observation_id)` prohibits duplicate
+observations in a run; `CHECK(position >= 0)` preserves valid sequence positions.
+
 ## Relationship Summary
 
 ```text
@@ -484,13 +558,13 @@ composite foreign key guarantees the import belongs to that source capture.
 Hierarchy rows point to the first and last import where they were observed; the
 raw source file remains the detailed evidence.
 
-## Deliberate First-Slice Exclusions
+## Current Exclusions
 
-This schema does not add threads, FTS tables, attribution tables,
-player/character entities, scenes, arcs, identity alias history,
-attachment child tables, message edit history, a dedicated audit-event table,
-semantic search, LLM functionality, or a GUI. Those are separate follow-up
-slices, not implied by these definitions.
+The schema still does not persist Discord thread membership, FTS tables,
+attachment child tables, message edit history, semantic search, LLM
+functionality, or a GUI. Boundary detection is limited to versioned run and
+candidate records; it does not reconstruct scenes or write candidate
+membership into curated `scenes` or `scene_messages`.
 
 The schema can retain message payload observations per import, but selecting a
 preferred observation across sources requires application logic that considers
