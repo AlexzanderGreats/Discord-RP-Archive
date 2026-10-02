@@ -30,6 +30,11 @@ candidate_spans
 candidate_span_messages
 candidate_reply_links
 segmentation_boundary_decisions
+identity_inference_runs
+provisional_identity_candidates
+identity_candidate_evidence
+identity_candidate_review_events
+identity_candidate_evidence_overrides
 documents
 document_chunks
 document_entries
@@ -37,9 +42,9 @@ schema_migrations
 ```
 
 This is the migration-backed schema used by both the Discord JSON and document
-importers (version 017). The checked-in live database may still be at version
-015 and requires explicit migrations before it can use boundary persistence or
-candidate segmentation.
+importers (version 018). Databases at earlier versions require explicit
+migrations before they can use boundary persistence, candidate segmentation,
+or identity candidate inference.
 
 Migration 016 adds versioned boundary detection runs and candidate results.
 These are separate from the curated `scenes` and `scene_messages` tables; no
@@ -48,6 +53,11 @@ candidate message membership is stored in curated scene data.
 Migration 017 adds versioned segmentation runs, draft spans, explicit candidate
 memberships, reply links, and boundary-decision evidence. These structures also
 remain separate from curated scenes and memberships.
+
+Migration 018 adds independent speaker identity inference runs, provisional
+identity candidates, per-message evidence, reviewer decisions, and durable
+evidence overrides. These records do not create characters or players, write
+to `message_attributions`, or assign scene membership.
 
 Scene curation is implemented in migration 015. Scene membership is explicit
 and ordered through `scene_messages`; `scene_channels` is a view of the distinct
@@ -572,6 +582,31 @@ No foreign key or trigger links these records to curated `scenes` or
 time partition within a scope. The membership schema itself does not enforce
 one span per message, leaving later reviewed reconstruction room to represent
 ambiguity or overlapping interactions without changing curated scene data.
+
+## Identity candidate tables
+
+Migration 018 introduces:
+
+- `identity_inference_runs`: versioned inference runs with an input fingerprint,
+  status, and evidence/candidate counts.
+- `provisional_identity_candidates`: stable, normalized speaker-label groups
+  within a known server; missing server scope stays per-observation.
+  The original display label is retained, but these rows are not characters,
+  players, or accepted attributions.
+- `identity_candidate_evidence`: each observed speaker label tied to the
+  message observation and inference run. Registered alias matches and
+  ambiguous matches are recorded separately from provisional labels, including
+  all matching character IDs.
+- `identity_candidate_review_events`: append-only reviewer actions to link a
+  provisional candidate to an existing character, leave it unresolved, split
+  or reassign message evidence, or exclude evidence.
+- `identity_candidate_evidence_overrides`: the current message-level
+  reassignment/exclusion used across later detection runs; every override
+  references its immutable review event.
+
+Provisional identity evidence references messages, not candidate spans.
+Later reconstruction can associate it with spans through message membership
+without making attribution dependent on segmentation.
 
 ## Relationship Summary
 

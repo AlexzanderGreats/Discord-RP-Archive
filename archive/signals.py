@@ -194,6 +194,30 @@ def _narrative_context(lines: list[str]) -> dict[str, str]:
     return contexts
 
 
+def _speaker_marker_signal(message: _Message) -> Signal | None:
+    lines = _content_lines(_get(message.record, "content_original"))
+    speaker = _speaker_marker(lines)
+    if speaker is None:
+        return None
+    speaker_text, speaker_line = speaker
+    return Signal(
+        signal_type="speaker_marker",
+        source_message_ids=(message.observation_id,),
+        evidence_kind="explicit",
+        observed_value={"text": speaker_text},
+        evidence={"content_line": speaker_line, "identity_resolved": False},
+    )
+
+
+def extract_speaker_marker_signals(messages: Sequence[MessageRecord]) -> list[Signal]:
+    """Extract only header speaker-marker signals from message observations."""
+    return [
+        signal
+        for signal in (_speaker_marker_signal(_message(record)) for record in messages)
+        if signal is not None
+    ]
+
+
 def extract_signals(messages: Sequence[MessageRecord]) -> list[Signal]:
     """Extract deterministic signals from chronologically ordered message observations.
 
@@ -262,16 +286,9 @@ def extract_signals(messages: Sequence[MessageRecord]) -> list[Signal]:
                     evidence={"rule": "line begins with OOC: or (OOC)"},
                 ))
 
-        speaker = _speaker_marker(lines)
-        if speaker is not None:
-            speaker_text, speaker_line = speaker
-            signals.append(Signal(
-                signal_type="speaker_marker",
-                source_message_ids=(message_id,),
-                evidence_kind="explicit",
-                observed_value={"text": speaker_text},
-                evidence={"content_line": speaker_line, "identity_resolved": False},
-            ))
+        speaker_signal = _speaker_marker_signal(message)
+        if speaker_signal is not None:
+            signals.append(speaker_signal)
 
     by_discord_id: dict[str, list[_Message]] = defaultdict(list)
     for message in parsed_messages:

@@ -226,6 +226,36 @@ Fictional time is optional scene metadata and is independent of Discord time.
 Unreviewed attribution proposals are not treated as accepted character/player
 identity when reading scene messages.
 
+## Identity Candidate Inference (Implemented)
+
+The existing `message_attributions` workflow remains the reviewable claim
+system for registered identities: exact registered character aliases and
+time-valid Discord-identity/player links create pending claims, never accepted
+claims. Phase E adds `archive/identity_inference.py` and
+`archive/identity_candidate_persistence.py` as a separate evidence layer.
+
+The new layer consumes Phase B header speaker-marker signals. An exact
+normalized alias match is recorded against its registered character ID;
+multiple alias matches remain an explicit ambiguous evidence record. A label
+with no registered alias match becomes a provisional candidate, grouped by a
+stable key derived from its case-folded, whitespace-normalized label within the
+known server. Missing server scope yields separate candidates per observation
+instead of merging across unknown contexts. Each observation retains the exact
+captured label and source line. Author identity is contextual evidence only;
+a speaker label never implies a player.
+
+Provisional candidates are not inserted into `characters`, `players`, or
+`message_attributions`, and have no confidence score or automatic acceptance.
+Migration 018 stores inference runs and per-message evidence independently
+from curated attribution and scene data. Reviewer actions are append-only;
+message-level split, reassignment, and exclusion overrides remain effective
+across subsequent detection runs. A reviewer can register a new character
+through the existing character API, then explicitly link the provisional
+candidate to that character. Candidates link to messages rather than spans, so
+reconstruction can later join identity evidence to whichever candidate
+memberships it reviews without making identity inference depend on
+segmentation.
+
 ## Pipeline Overview
 
 The implemented flow can be represented as:
@@ -672,11 +702,12 @@ remains deferred to the Reader/search layer.
 | FTS failure | Discord FTS runs after imports; document FTS is inside its transaction. |
 | CLI exit status after per-file failures | Both import CLIs generally return `0`. |
 
-## Current Boundary of Implementation
+## Remaining Out-of-Scope Capabilities
 
-The implemented system currently ends at ingestion and search-index creation.
-There is no implemented reader UI, search CLI/API, backup workflow, or later
-character/player attribution stage in the inspected source tree. The empty
-`database.py`, `discord_parser.py`, and `validator.py` files do not currently
-own the logic described above; the behavior is concentrated in
-`build_archive.py` and `document_parser.py`.
+There is no implemented reader UI, search CLI/API, or backup workflow.
+Automated identity inference is limited to explicit header labels and
+registered-alias lookup; it does not infer identity from natural-language
+content or infer players from speaker labels. The empty `database.py`,
+`discord_parser.py`, and `validator.py` files do not own the importer logic;
+Discord and document ingestion remain concentrated in `build_archive.py` and
+`document_parser.py`.

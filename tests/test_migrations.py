@@ -70,12 +70,12 @@ class MigrationTests(unittest.TestCase):
         self.connection.close()
 
     def test_migrations_preserve_legacy_rows_and_are_repeatable(self) -> None:
-        self.assertEqual(run_migrations(self.connection), 17)
+        self.assertEqual(run_migrations(self.connection), 18)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM document_chunks").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM legacy_document_entries").fetchone()[0], 1)
-        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 17)
+        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 18)
         tables = {
             row[0]
             for row in self.connection.execute(
@@ -95,6 +95,9 @@ class MigrationTests(unittest.TestCase):
                 "boundary_detection_run_messages",
                 "segmentation_runs", "candidate_spans", "candidate_span_messages",
                 "candidate_reply_links", "segmentation_boundary_decisions",
+                "identity_inference_runs", "provisional_identity_candidates",
+                "identity_candidate_evidence", "identity_candidate_review_events",
+                "identity_candidate_evidence_overrides",
             },
         )
         message_columns = {
@@ -106,7 +109,7 @@ class MigrationTests(unittest.TestCase):
             "SELECT document_id, entry_index, content_text FROM document_entries"
         ).fetchone()
         self.assertEqual(tuple(migrated_entry), (7, 0, ""))
-        self.assertEqual(run_migrations(self.connection), 17)
+        self.assertEqual(run_migrations(self.connection), 18)
 
     def test_changed_applied_migration_is_rejected(self) -> None:
         run_migrations(self.connection)
@@ -124,10 +127,16 @@ class MigrationTests(unittest.TestCase):
             ("25439f9cbd3bb2e571d275b8a7121a2e47e998d1b4abb1a61e93723eaf3b3aa5",),
         )
 
-        self.assertEqual(run_migrations(self.connection), 17)
+        self.assertEqual(run_migrations(self.connection), 18)
 
     def test_candidate_migrations_upgrade_a_version_15_database(self) -> None:
         run_migrations(self.connection)
+        self.connection.execute("DROP TABLE identity_candidate_evidence_overrides")
+        self.connection.execute("DROP TABLE identity_candidate_review_events")
+        self.connection.execute("DROP TABLE identity_candidate_evidence")
+        self.connection.execute("DROP TABLE provisional_identity_candidates")
+        self.connection.execute("DROP TABLE identity_inference_runs")
+        self.connection.execute("DELETE FROM schema_migrations WHERE version = 18")
         self.connection.execute("DROP TABLE segmentation_boundary_decisions")
         self.connection.execute("DROP TABLE candidate_reply_links")
         self.connection.execute("DROP TABLE candidate_span_messages")
@@ -140,10 +149,16 @@ class MigrationTests(unittest.TestCase):
         self.connection.execute("DELETE FROM schema_migrations WHERE version = 16")
         self.connection.commit()
 
-        self.assertEqual(run_migrations(self.connection), 17)
+        self.assertEqual(run_migrations(self.connection), 18)
         self.assertIsNotNone(
             self.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'candidate_spans'"
+            ).fetchone()
+        )
+        self.assertIsNotNone(
+            self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'provisional_identity_candidates'"
             ).fetchone()
         )
         self.assertEqual(self.connection.execute("PRAGMA foreign_key_check").fetchall(), [])
