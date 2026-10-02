@@ -38,6 +38,10 @@ class OllamaServiceTests(unittest.TestCase):
         self.assertIn("capture.json", payload["messages"][1]["content"])
         self.assertIn("cite each factual claim", payload["messages"][0]["content"].casefold())
         self.assertIn("concise paragraph, usually 2-5 sentences", payload["messages"][0]["content"])
+        self.assertIn("Do not interpret proximity as chronology or event completion", payload["messages"][0]["content"])
+        self.assertIn("not necessarily after the event described", payload["messages"][0]["content"])
+        self.assertIn("do not infer change from a single scene", payload["messages"][0]["content"])
+        self.assertIn("multiple temporally distinct states", payload["messages"][0]["content"])
         self.assertIn("Do not combine separate encounters", payload["messages"][0]["content"])
         self.assertEqual(details.user_context, payload["messages"][1]["content"])
         self.assertEqual(details.system_instructions, payload["messages"][0]["content"])
@@ -60,6 +64,27 @@ class OllamaServiceTests(unittest.TestCase):
         self.assertEqual(result.evidence, [])
         self.assertIn("no model answer was generated", result.answer)
         ollama.generate.assert_not_called()
+
+    def test_output_token_budget_follows_question_type(self) -> None:
+        questions_and_budgets = [
+            ("What color was the compass?", 384),
+            ("Explain what happened at the meeting.", 768),
+            ("How did their relationship evolve across several events?", 1024),
+            ("Compare their relationship across scenes.", 1024),
+            ("Give an overview of all interactions across the archive.", 1536),
+            ("Who played Winter?", 512),
+        ]
+        client = OllamaClient()
+
+        with patch.object(
+            client, "_request", return_value={"message": {"content": "Answer."}}
+        ) as request:
+            for question, expected_budget in questions_and_budgets:
+                _answer, details = client.generate_with_details("test-model", question, [])
+
+                request_body = request.call_args.args[2]
+                self.assertEqual(request_body["options"]["num_predict"], expected_budget)
+                self.assertEqual(details.settings["max tokens"], expected_budget)
 
     def test_list_models_reads_local_tags(self) -> None:
         response = MagicMock()

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -27,6 +30,59 @@ class OllamaRequestDetails:
     user_context: str
     system_instructions: str
     settings: dict[str, Any]
+
+
+class QuestionType(str, Enum):
+    EXTRACTION = "extraction"
+    NORMAL_QA = "normal_qa"
+    CHRONOLOGY = "chronology"
+    SYNTHESIS = "synthesis"
+    RESEARCH = "research"
+    ATTRIBUTION = "attribution"
+
+
+def classify_question(question: str) -> QuestionType:
+    normalized = question.casefold()
+    if re.search(
+        r"\b(who (?:said|wrote|created|played)|who is .* played by|author|attribut(?:e|ion))\b",
+        normalized,
+    ):
+        return QuestionType.ATTRIBUTION
+    if re.search(
+        r"\b(across (?:time|events|the arc|(?:(?:the|several|multiple|many|different|server) )?(?:server )?events?)|"
+        r"over time|changed|change|evolved|developed|timeline|chronolog|"
+        r"immediately (?:after|before)|what happened (?:after|before)|following)\b",
+        normalized,
+    ):
+        return QuestionType.CHRONOLOGY
+    if re.search(
+        r"\b(all|every|overview|summari[sz]e|research|everything|across the archive)\b",
+        normalized,
+    ):
+        return QuestionType.RESEARCH
+    if re.search(
+        r"\b(relationship|compare|compared|connection|interactions|pattern|influence)\b",
+        normalized,
+    ):
+        return QuestionType.SYNTHESIS
+    if re.search(r"\bhow (?:many|much)\b", normalized):
+        return QuestionType.EXTRACTION
+    if re.search(r"\b(explain|describe|tell me|why|how|what happened)\b", normalized):
+        return QuestionType.NORMAL_QA
+    if re.search(r"\b(what|who|where|when|which)\b", normalized):
+        return QuestionType.EXTRACTION
+    return QuestionType.NORMAL_QA
+
+
+def output_token_budget(question: str) -> int:
+    return {
+        QuestionType.EXTRACTION: 384,
+        QuestionType.NORMAL_QA: 768,
+        QuestionType.ATTRIBUTION: 512,
+        QuestionType.CHRONOLOGY: 1024,
+        QuestionType.SYNTHESIS: 1024,
+        QuestionType.RESEARCH: 1536,
+    }[classify_question(question)]
 
 
 class OllamaClient:
@@ -73,6 +129,12 @@ class OllamaClient:
             "additional detail when needed to explain a sequence. Do not use headings "
             "or bullet lists unless requested, and avoid preambles or unrelated details. "
             "Use timestamps and adjacent-message labels to understand chronology. "
+            "Do not interpret proximity as chronology or event completion. 'Adjacent after' "
+            "means later than the retrieved match, not necessarily after the event described "
+            "by the user's question. If the evidence does not establish that an event has "
+            "ended, say so. When a question asks how something changed over time, do not "
+            "infer change from a single scene. Retrieve or identify multiple temporally "
+            "distinct states. "
             "If the sequence is unclear, say the archive does not establish what "
             "happened next. Do not combine separate encounters or invent events."
         )
@@ -80,7 +142,7 @@ class OllamaClient:
             f"Question: {question}\n\n"
             f"Retrieved archive evidence (JSON): {json.dumps(context, ensure_ascii=False)}"
         )
-        options = {"temperature": 0.2, "num_predict": 384}
+        options = {"temperature": 0.2, "num_predict": output_token_budget(question)}
         request_model = model.strip()
         payload = self._request(
             "POST",
@@ -144,38 +206,82 @@ class ArchiveAnswerService:
         self.ollama = ollama
 
     def retrieve(self, question: str, *, limit: int = 8) -> list[dict[str, Any]]:
-        matches = self.search_service.search_relevant(question, limit=limit)
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+        question_type = classify_question(question)
+        broad_types = {QuestionType.CHRONOLOGY, QuestionType.SYNTHESIS, QuestionType.RESEARCH}
+        candidate_limit = min(max(limit * 8, 32), 256) if question_type in broad_types else limit
+        matches = self.search_service.search_relevant(question, limit=candidate_limit)
         if not matches:
             return []
 
-        channel_scores: dict[int | None, float] = {}
-        for match in matches:
-            channel_id = match.get("channel_id")
-            channel_scores[channel_id] = channel_scores.get(channel_id, 0) + match.get(
-                "relevance_score", 0
-            )
-        best_channel_id = max(channel_scores, key=channel_scores.__getitem__)
-        anchor = next(match for match in matches if match.get("channel_id") == best_channel_id)
+        if question_type in broad_types:
+            anchors = self._select_temporal_anchors(matches, limit=limit)
+        else:
+            channel_scores: dict[int | None, float] = {}
+            for match in matches:
+                channel_id = match.get("channel_id")
+                channel_scores[channel_id] = channel_scores.get(channel_id, 0) + match.get(
+                    "relevance_score", 0
+                )
+            best_channel_id = max(channel_scores, key=channel_scores.__getitem__)
+            anchors = [next(match for match in matches if match.get("channel_id") == best_channel_id)]
+
         reader = ReaderService(self.search_service.connection)
         evidence: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        anchor_ids = {anchor["message_observation_id"] for anchor in anchors}
+        for anchor in anchors:
+            context = reader.get_message_context(anchor["message_observation_id"], before=1, after=5)
+            if context is None:
+                context = {"before": [], "message": anchor, "after": []}
+            match_relation = "query match" if len(anchors) == 1 else "event match"
+            for relation, item in (
+                *(("adjacent before", message) for message in context["before"]),
+                (match_relation, context["message"]),
+                *(("adjacent after", message) for message in context["after"]),
+            ):
+                observation_id = item["message_observation_id"]
+                if observation_id in anchor_ids and observation_id != anchor["message_observation_id"]:
+                    continue
+                if observation_id in seen_ids:
+                    continue
+                seen_ids.add(observation_id)
+                record = dict(item)
+                record["context_relation"] = relation
+                if relation == match_relation:
+                    record["relevance_score"] = anchor.get("relevance_score")
+                evidence.append(record)
 
-        anchor_id = anchor["message_observation_id"]
-        context = reader.get_message_context(anchor_id, before=1, after=5)
-        if context is None:
-            context = {"before": [], "message": anchor, "after": []}
+        return sorted(
+            evidence,
+            key=lambda item: (item.get("timestamp_utc") or "", item["message_observation_id"]),
+        )
 
-        for relation, item in (
-            *(("adjacent before", message) for message in context["before"]),
-            ("query match", context["message"]),
-            *(("adjacent after", message) for message in context["after"]),
-        ):
-            record = dict(item)
-            record["context_relation"] = relation
-            if relation == "query match":
-                record["relevance_score"] = anchor.get("relevance_score")
-            evidence.append(record)
-
-        return evidence
+    @staticmethod
+    def _select_temporal_anchors(
+        matches: list[dict[str, Any]], *, limit: int
+    ) -> list[dict[str, Any]]:
+        events: dict[tuple[int | None, str], dict[str, Any]] = {}
+        for match in matches:
+            timestamp = match.get("timestamp_utc")
+            try:
+                event_day = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date().isoformat()
+            except (AttributeError, ValueError):
+                event_day = "unknown-date"
+            key = (match.get("channel_id"), event_day)
+            current = events.get(key)
+            if current is None or match.get("relevance_score", 0) > current.get("relevance_score", 0):
+                events[key] = match
+        events_in_time = sorted(
+            events.values(),
+            key=lambda item: (item.get("timestamp_utc") or "", item["message_observation_id"]),
+        )
+        if len(events_in_time) <= limit:
+            return events_in_time
+        selected_indexes = [round(index * (len(events_in_time) - 1) / (limit - 1))
+                            for index in range(limit)] if limit > 1 else [len(events_in_time) - 1]
+        return [events_in_time[index] for index in selected_indexes]
 
     def answer(self, question: str, model: str, *, limit: int = 8) -> ArchiveAnswer:
         evidence = self.retrieve(question, limit=limit)

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from archive.ollama_service import ArchiveAnswerService
+from archive.ollama_service import ArchiveAnswerService, QuestionType, classify_question
 from archive.reader_service import ReaderService
 from archive.search_service import SearchService
 from src.build_archive import create_database, import_file
@@ -111,6 +111,42 @@ class SearchReaderServiceTests(unittest.TestCase):
         self.assertEqual(
             [item["context_relation"] for item in evidence],
             ["adjacent before", "query match", "adjacent after"],
+        )
+
+    def test_question_classifier_selects_retrieval_intent(self) -> None:
+        self.assertEqual(
+            classify_question("How did Winter's relationship with Dabris change across server events?"),
+            QuestionType.CHRONOLOGY,
+        )
+        self.assertEqual(
+            classify_question("What happened immediately after Winter's fight with Dravum?"),
+            QuestionType.CHRONOLOGY,
+        )
+        self.assertEqual(
+            classify_question("How did Winter interact with Dabris across server events?"),
+            QuestionType.CHRONOLOGY,
+        )
+        self.assertEqual(classify_question("Who played Winter?"), QuestionType.ATTRIBUTION)
+        self.assertEqual(classify_question("What color was the compass?"), QuestionType.EXTRACTION)
+
+    def test_chronology_retrieval_keeps_distinct_event_dates(self) -> None:
+        self._write_export([
+            {"id": "one", "timestamp": "2026-01-01T00:00:00Z", "content": "Winter confronts Dabris."},
+            {"id": "two", "timestamp": "2026-01-01T00:01:00Z", "content": "Winter argues with Dabris again."},
+            {"id": "three", "timestamp": "2026-01-08T00:00:00Z", "content": "Winter apologizes to Dabris."},
+            {"id": "four", "timestamp": "2026-01-20T00:00:00Z", "content": "Winter and Dabris make peace."},
+        ])
+        import_file(self.connection, self.export_path)
+        answer_service = ArchiveAnswerService(self.search_service, None)
+
+        evidence = answer_service.retrieve(
+            "How did Winter's relationship with Dabris change across server events?", limit=3
+        )
+
+        event_matches = [item for item in evidence if item["context_relation"] == "event match"]
+        self.assertEqual(
+            [item["timestamp_utc"][:10] for item in event_matches],
+            ["2026-01-01", "2026-01-08", "2026-01-20"],
         )
 
     def test_recapture_hides_superseded_observations(self) -> None:

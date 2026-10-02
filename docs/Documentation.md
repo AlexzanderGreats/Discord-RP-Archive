@@ -413,6 +413,53 @@ yet parse the modeled boolean/field-filter query language, search documents, or
 use FTS. Focused coverage is in
 `tests/test_search_reader_services.py`.
 
+### Question-Aware Ask Retrieval
+
+The Ask service classifies each question with local text heuristics before
+retrieval. The categories are extraction, normal QA, chronology, synthesis,
+research, and attribution. This classification is deterministic and does not
+make a model call.
+
+Extraction, normal QA, and attribution use narrow retrieval: rank relevant
+messages, choose the channel with the strongest cluster of matches, and expand
+the best match with one preceding and up to five following messages. Search
+results include accepted character/player attribution metadata when available.
+Chronology, synthesis, and research retrieve a larger candidate pool, bounded
+to 32-256 messages (eight times the requested limit within those bounds). They
+select the strongest hit per channel and calendar date, spread selected hits
+across the available timeline when necessary, preserve each selected hit as an
+event anchor, and return the evidence in chronological order. Surrounding
+messages are included as context and duplicate observations are removed.
+
+Channel/date groups are only event proxies; they are not confirmed scene
+boundaries. Adjacent messages establish that a message is earlier or later than
+the retrieved match, not that the event in the question has begun or ended.
+Automatic retrieval does not yet use curated `scene_messages` to identify event
+boundaries or the first message after an event. The system prompt therefore
+instructs the model not to equate proximity with event completion, to state
+when evidence does not establish an ending, and to require multiple temporally
+distinct states before describing change over time. An uncertain sequence must
+be reported as uncertain rather than inferred from adjacency.
+
+The Ollama `num_predict` output budget is selected by question type:
+
+| Question type | Output-token budget |
+| --- | ---: |
+| Extraction | 384 |
+| Attribution | 512 |
+| Normal QA | 768 |
+| Chronology | 1,024 |
+| Synthesis | 1,024 |
+| Research | 1,536 |
+
+The budget controls the maximum generated output, not the prompt or context
+window. Thinking remains disabled, temperature is `0.2`, and `num_ctx` is not
+sent, so Ollama uses its configured default. If no evidence is retrieved, the
+model is not called. The model is instructed to cite evidence references, but
+citations are not independently validated. Retrieval and classification tests
+are in `tests/test_search_reader_services.py` and
+`tests/test_ollama_service.py`.
+
 ## Desktop GUI and Startup Synchronization
 
 Open the desktop application from the repository root:
@@ -445,28 +492,16 @@ indexes that already exist; FTS remains deferred.
 
 Home, Search, Reader, and Ask are the current GUI surfaces. Search uses
 `SearchService`; double-clicking a result opens its surrounding channel context
-through `ReaderService`. Ask retrieves current Discord messages with
-`search_relevant()` and sends only those messages, with source metadata, to the
-local Ollama chat API. The Answer view displays the response and retrieved
-evidence. The LLM Diagnostics view shows the ranked retrieval results (source,
-date, and relevance score), the exact user-message context and system
-instructions sent to Ollama, the selected model, request settings, and the
-answer. The context shown includes the question and the JSON evidence payload;
-each message's content is truncated to 1,500 characters before being sent.
-Retrieval ranks rare and capitalized query terms more heavily, favors the
-channel with the strongest cluster of matches, and includes the previous message
-and up to five following messages around its best hit. These adjacent messages
-are labeled in the evidence view.
-Thinking is disabled (`think: false`) so reasoning tokens do not crowd out
-the answer. Answers are requested as concise paragraphs, usually 2-5 sentences,
-with a maximum of 384 output tokens. Temperature is set to `0.2`; context size (`num_ctx`) is not
-sent, so Ollama uses its default. Retrieval weights rare query terms more
-heavily than common ones.
-**Export test** saves the diagnostics and answer as a `.txt` file and becomes
-available after an answer is generated. If retrieval finds nothing, Ollama is
-not called. The model is instructed to cite evidence references, but generated
-citations are not independently validated. This is keyword retrieval, not
-semantic or document retrieval.
+through `ReaderService`. Ask uses the question-aware retrieval and answer
+generation pipeline described above, then sends retrieved messages and source
+metadata to the local Ollama chat API. The Answer view displays the response
+and retrieved evidence. The LLM Diagnostics view shows retrieval results, the
+exact user-message context and system instructions sent to Ollama, the selected
+model, request settings, and the answer. The context includes the question and
+JSON evidence payload; each message's content is truncated to 1,500 characters
+before being sent. **Export test** saves the diagnostics and answer as a `.txt`
+file and becomes available after an answer is generated. Retrieval is keyword
+based, not semantic or document retrieval.
 
 Ollama Q&A uses the local endpoint `http://127.0.0.1:11434` by default and adds
 no Python package dependencies. Ensure Ollama is running and a model is
