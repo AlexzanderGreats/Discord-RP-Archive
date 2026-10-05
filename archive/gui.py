@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tkinter as tk
 from queue import Empty, Queue
 from pathlib import Path
@@ -13,6 +16,92 @@ from archive.reader_service import ReaderService
 from archive.ollama_service import ArchiveAnswerService, OllamaClient, OllamaRequestDetails
 from archive.search_service import SearchService
 from archive.sync_service import StartupSyncReport, synchronize_archive
+
+
+THEME_PALETTES = {
+    "light": {
+        "background": "#f4f6f8",
+        "surface": "#ffffff",
+        "foreground": "#202830",
+        "muted": "#58636d",
+        "border": "#c7d0d8",
+        "field": "#ffffff",
+        "selection": "#cfe3f5",
+        "selection_foreground": "#17212b",
+        "warning": "#9a3f2b",
+    },
+    "dark": {
+        "background": "#1e2228",
+        "surface": "#282e36",
+        "foreground": "#e6e9ed",
+        "muted": "#aab4bf",
+        "border": "#414a55",
+        "field": "#20252b",
+        "selection": "#355779",
+        "selection_foreground": "#ffffff",
+        "warning": "#ff9c82",
+    },
+}
+THEME_OPTIONS = ("System", "Light", "Dark")
+
+
+def _theme_config_path() -> Path:
+    if sys.platform == "win32":
+        config_directory = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return config_directory / "Discord RP Archive" / "settings.json"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Discord RP Archive" / "settings.json"
+    config_directory = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_directory / "discord-rp-archive" / "settings.json"
+
+
+def _detect_system_theme() -> str | None:
+    if sys.platform == "win32":
+        import winreg
+
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            ) as key:
+                use_light_theme, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        except FileNotFoundError:
+            return None
+        return "light" if use_light_theme else "dark"
+
+    if sys.platform == "darwin":
+        result = subprocess.run(
+            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return "light"
+        return "dark" if result.stdout.strip().lower() == "dark" else "light"
+
+    try:
+        result = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except FileNotFoundError:
+        result = None
+    if result is not None and result.returncode == 0:
+        preference = result.stdout.strip().strip("'\"").lower()
+        if preference in {"prefer-dark", "prefer-light"}:
+            return "dark" if preference == "prefer-dark" else "light"
+        if preference == "default":
+            return "light"
+
+    gtk_theme = os.environ.get("GTK_THEME", "").lower()
+    if gtk_theme:
+        return "dark" if "dark" in gtk_theme else "light"
+    return None
 
 
 class ArchiveApp:
@@ -32,10 +121,32 @@ class ArchiveApp:
         self.root.minsize(760, 520)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
+        self.style = ttk.Style(self.root)
+        self.style.theme_use("clam")
+        self.theme_preference = self._load_theme_preference()
+        self._system_theme: str | None = None
+
         container = ttk.Frame(root, padding=16)
         container.pack(fill="both", expand=True)
-        ttk.Label(container, text="Discord RP Archive", font=("Segoe UI", 20, "bold")).pack(anchor="w")
-        ttk.Label(container, text=str(database_path), foreground="#58636d").pack(anchor="w", pady=(2, 14))
+        heading = ttk.Frame(container)
+        heading.pack(fill="x")
+        ttk.Label(heading, text="Discord RP Archive", font=("Segoe UI", 20, "bold")).pack(side="left", anchor="w")
+        theme_controls = ttk.Frame(heading)
+        theme_controls.pack(side="right", anchor="e")
+        ttk.Label(theme_controls, text="Theme").pack(side="left", padx=(0, 6))
+        self.theme_choice = tk.StringVar(value=self.theme_preference)
+        self.theme_picker = ttk.Combobox(
+            theme_controls,
+            textvariable=self.theme_choice,
+            values=THEME_OPTIONS,
+            state="readonly",
+            width=9,
+        )
+        self.theme_picker.pack(side="left")
+        self.theme_picker.bind("<<ComboboxSelected>>", self._change_theme)
+        self.theme_status = ttk.Label(theme_controls, style="Muted.TLabel")
+        self.theme_status.pack(side="left", padx=(8, 0))
+        ttk.Label(container, text=str(database_path), style="Muted.TLabel").pack(anchor="w", pady=(2, 14))
 
         self.pages = ttk.Notebook(container)
         self.pages.pack(fill="both", expand=True)
@@ -43,6 +154,180 @@ class ArchiveApp:
         self._build_search()
         self._build_reader()
         self._build_ask()
+        self._apply_theme()
+        self._poll_system_theme()
+
+    def _load_theme_preference(self) -> str:
+        try:
+            settings = json.loads(_theme_config_path().read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return "System"
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            messagebox.showwarning(
+                "Theme settings unavailable",
+                f"Could not read saved theme settings; using System theme.\n\n{error}",
+                parent=self.root,
+            )
+            return "System"
+        preference = settings.get("theme", "System") if isinstance(settings, dict) else None
+        if preference in THEME_OPTIONS:
+            return preference
+        messagebox.showwarning(
+            "Theme settings unavailable",
+            "The saved theme setting is invalid; using System theme.",
+            parent=self.root,
+        )
+        return "System"
+
+    def _change_theme(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        preference = self.theme_choice.get()
+        if preference not in THEME_OPTIONS:
+            return
+        try:
+            path = _theme_config_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            settings: dict[str, Any] = {}
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    settings = existing
+            except FileNotFoundError:
+                pass
+            settings["theme"] = preference
+            path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            messagebox.showerror(
+                "Could not save theme",
+                f"The theme was changed for this session, but could not be saved.\n\n{error}",
+                parent=self.root,
+            )
+        self.theme_preference = preference
+        self._apply_theme()
+
+    def _poll_system_theme(self) -> None:
+        if self.theme_preference == "System":
+            try:
+                detected_theme = _detect_system_theme()
+            except (OSError, subprocess.SubprocessError) as error:
+                detected_theme = None
+                self._system_theme = None
+                self.theme_status.configure(text=f"System preference unavailable: {error}")
+            else:
+                self._system_theme = detected_theme
+                if detected_theme is None:
+                    self.theme_status.configure(text="System preference unavailable")
+                else:
+                    self.theme_status.configure(text=f"System: {detected_theme.title()}")
+            effective_theme = detected_theme or "light"
+            if effective_theme != getattr(self, "_applied_theme", None):
+                self._apply_theme()
+        else:
+            self.theme_status.configure(text="")
+        self.root.after(3000, self._poll_system_theme)
+
+    def _apply_theme(self) -> None:
+        if self.theme_preference == "System":
+            theme = self._system_theme or "light"
+        else:
+            theme = self.theme_preference.lower()
+        colors = THEME_PALETTES[theme]
+        self._applied_theme = theme
+        self.root.configure(background=colors["background"])
+        self.style.configure(".", background=colors["background"], foreground=colors["foreground"])
+        self.style.configure("TFrame", background=colors["background"])
+        self.style.configure("TLabel", background=colors["background"], foreground=colors["foreground"])
+        self.style.configure("Muted.TLabel", foreground=colors["muted"])
+        self.style.configure("Warning.TLabel", foreground=colors["warning"])
+        self.style.configure("TButton", background=colors["surface"], foreground=colors["foreground"])
+        self.style.map(
+            "TButton",
+            background=[("active", colors["border"]), ("disabled", colors["background"])],
+            foreground=[("disabled", colors["muted"])],
+        )
+        self.style.configure(
+            "TEntry",
+            fieldbackground=colors["field"],
+            foreground=colors["foreground"],
+            insertcolor=colors["foreground"],
+        )
+        self.style.configure(
+            "TCombobox",
+            fieldbackground=colors["field"],
+            background=colors["surface"],
+            foreground=colors["foreground"],
+            arrowcolor=colors["foreground"],
+        )
+        self.style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", colors["field"])],
+            foreground=[("readonly", colors["foreground"])],
+            selectbackground=[("readonly", colors["selection"])],
+            selectforeground=[("readonly", colors["selection_foreground"])],
+        )
+        self.style.configure(
+            "TNotebook",
+            background=colors["background"],
+            bordercolor=colors["border"],
+            tabmargins=(2, 4, 2, 0),
+        )
+        self.style.configure(
+            "TNotebook.Tab",
+            background=colors["surface"],
+            foreground=colors["muted"],
+            padding=(10, 5),
+        )
+        self.style.map(
+            "TNotebook.Tab",
+            background=[("selected", colors["background"]), ("active", colors["border"])],
+            foreground=[("selected", colors["foreground"])],
+        )
+        self.style.configure(
+            "Treeview",
+            background=colors["field"],
+            fieldbackground=colors["field"],
+            foreground=colors["foreground"],
+            rowheight=24,
+        )
+        self.style.map(
+            "Treeview",
+            background=[("selected", colors["selection"])],
+            foreground=[("selected", colors["selection_foreground"])],
+        )
+        self.style.configure(
+            "Treeview.Heading",
+            background=colors["surface"],
+            foreground=colors["foreground"],
+        )
+        self.style.configure(
+            "TScrollbar",
+            background=colors["surface"],
+            troughcolor=colors["background"],
+            bordercolor=colors["border"],
+            arrowcolor=colors["foreground"],
+        )
+        self.style.configure(
+            "Horizontal.TProgressbar",
+            background=colors["selection"],
+            troughcolor=colors["surface"],
+            bordercolor=colors["border"],
+        )
+        for widget in self._walk_widgets(self.root):
+            if isinstance(widget, tk.Text):
+                widget.configure(
+                    background=colors["field"],
+                    foreground=colors["foreground"],
+                    insertbackground=colors["foreground"],
+                    selectbackground=colors["selection"],
+                    selectforeground=colors["selection_foreground"],
+                )
+
+    @staticmethod
+    def _walk_widgets(parent: tk.Misc) -> list[tk.Misc]:
+        widgets: list[tk.Misc] = []
+        for child in parent.winfo_children():
+            widgets.append(child)
+            widgets.extend(ArchiveApp._walk_widgets(child))
+        return widgets
 
     def _build_home(self, sync_report: StartupSyncReport) -> None:
         page = ttk.Frame(self.pages, padding=20)
@@ -82,13 +367,13 @@ class ArchiveApp:
             )
             if len(issues) > 5:
                 details += f"\nAnd {len(issues) - 5} more item(s)."
-            ttk.Label(page, text=details, foreground="#9a3f2b", wraplength=760).pack(anchor="w", pady=(8, 0))
+            ttk.Label(page, text=details, style="Warning.TLabel", wraplength=760).pack(anchor="w", pady=(8, 0))
 
     @staticmethod
     def _metric(parent: ttk.Frame, label: str, value: str, column: int) -> None:
         item = ttk.Frame(parent, padding=(12, 10))
         item.grid(row=0, column=column, sticky="nsew", padx=(0, 8))
-        ttk.Label(item, text=label, foreground="#58636d").pack(anchor="w")
+        ttk.Label(item, text=label, style="Muted.TLabel").pack(anchor="w")
         ttk.Label(item, text=value, font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(4, 0))
         parent.columnconfigure(column, weight=1)
 
@@ -103,7 +388,7 @@ class ArchiveApp:
         entry.pack(side="left", fill="x", expand=True)
         entry.bind("<Return>", lambda _event: self._search())
         ttk.Button(controls, text="Search", command=self._search).pack(side="left", padx=(8, 0))
-        self.search_status = ttk.Label(page, text="Enter a phrase to search the archive.", foreground="#58636d")
+        self.search_status = ttk.Label(page, text="Enter a phrase to search the archive.", style="Muted.TLabel")
         self.search_status.pack(anchor="w", pady=(0, 6))
 
         columns = ("timestamp", "channel", "author", "character", "content")
@@ -159,7 +444,7 @@ class ArchiveApp:
         )
         self.export_answer_button.pack(side="left", padx=(8, 0))
         self.last_answer_export: str | None = None
-        self.ask_status = ttk.Label(page, text="Answers are generated only from retrieved archive messages.", foreground="#58636d")
+        self.ask_status = ttk.Label(page, text="Answers are generated only from retrieved archive messages.", style="Muted.TLabel")
         self.ask_status.pack(anchor="w", pady=(8, 6))
 
         self.ask_result_pages = ttk.Notebook(page)

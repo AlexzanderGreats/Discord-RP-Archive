@@ -500,7 +500,16 @@ exact user-message context and system instructions sent to Ollama, the selected
 model, request settings, and the answer. The context includes the question and
 JSON evidence payload; each message's content is truncated to 1,500 characters
 before being sent. **Export test** saves the diagnostics and answer as a `.txt`
-file and becomes available after an answer is generated. Retrieval is keyword
+file and becomes available after an answer is generated.
+
+The GUI theme selector supports **System**, **Light**, and **Dark** modes. System
+mode follows the OS appearance preference where it can be detected and checks
+for changes while the app is open. The selected mode is saved in the user's
+application settings directory (`%APPDATA%\Discord RP Archive` on Windows,
+`~/Library/Application Support/Discord RP Archive` on macOS, or
+`$XDG_CONFIG_HOME/discord-rp-archive` on Linux, defaulting to `~/.config`).
+If the system preference cannot be detected, System mode uses the light theme.
+Retrieval is keyword
 based, not semantic or document retrieval.
 
 Ask questions may include a Pacific time window in the form
