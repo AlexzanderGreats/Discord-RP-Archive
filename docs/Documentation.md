@@ -503,6 +503,15 @@ before being sent. **Export test** saves the diagnostics and answer as a `.txt`
 file and becomes available after an answer is generated. Retrieval is keyword
 based, not semantic or document retrieval.
 
+Ask questions may include a Pacific time window in the form
+`9/18/2025 from 1:31 AM to 3:02 PM` (or an ISO date). The retrieval layer
+constrains candidate messages and surrounding context to that interval; the
+end minute is inclusive. The times are interpreted as `America/Los_Angeles`
+and converted to UTC for querying, including daylight-saving time. Archive
+message timestamps are stored and displayed as UTC. Retrieval also searches
+author and accepted character/player names, normalizing compatibility Unicode
+used in stylized Discord names.
+
 Ollama Q&A uses the local endpoint `http://127.0.0.1:11434` by default and adds
 no Python package dependencies. Ensure Ollama is running and a model is
 available (`ollama list`), open the Ask tab, select **Refresh models**, choose a

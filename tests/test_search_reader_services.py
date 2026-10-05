@@ -149,6 +149,56 @@ class SearchReaderServiceTests(unittest.TestCase):
             ["2026-01-01", "2026-01-08", "2026-01-20"],
         )
 
+    def test_explicit_date_time_range_limits_retrieval_and_keeps_range_context(self) -> None:
+        self.export_path.write_text(
+            json.dumps({
+                "guild": {"id": "server", "name": "Server"},
+                "channel": {"id": "channel", "name": "Channel"},
+                "messages": [
+                    {
+                        "id": message_id,
+                        "timestamp": timestamp,
+                        "content": content,
+                        "author": {"id": author_id, "name": author_name},
+                    }
+                    for message_id, timestamp, content, author_id, author_name in [
+                        ("before", "2025-09-18T08:30:59+00:00", "Before", "oblivion", "𝕆𝕓𝕝𝕚𝕧𝕚𝕠"),
+                        ("start", "2025-09-18T08:31:00+00:00", "The disagreement begins.", "oblivion", "𝕆𝕓𝕝𝕚𝕧𝕚𝕠"),
+                        ("middle", "2025-09-18T15:15:00+00:00", "The response.", "dravum", "Kairos Dravum"),
+                        ("end", "2025-09-18T22:02:59+00:00", "The disagreement continues.", "oblivion", "𝕆𝕓𝕝𝕚𝕧𝕚𝕠"),
+                        ("after", "2025-09-18T22:03:00+00:00", "After the interval.", "dravum", "Kairos Dravum"),
+                    ]
+                ],
+            }),
+            encoding="utf-8",
+        )
+        import_file(self.connection, self.export_path)
+        answer_service = ArchiveAnswerService(self.search_service, None)
+
+        evidence = answer_service.retrieve(
+            "What argument did Oblivion and Dravum have during "
+            "9/18/2025 from 1:31 AM to 3:02 PM?"
+        )
+
+        message_ids = {item["discord_message_id"] for item in evidence}
+        self.assertIn("start", message_ids)
+        self.assertIn("middle", message_ids)
+        self.assertIn("end", message_ids)
+        self.assertNotIn("before", message_ids)
+        self.assertNotIn("after", message_ids)
+        self.assertTrue(all(
+            "2025-09-18T08:31:00+00:00" <= item["timestamp_utc"]
+            < "2025-09-18T22:03:00+00:00"
+            for item in evidence
+        ))
+        self.assertEqual(
+            classify_question(
+                "What argument did Oblivion and Dravum have during "
+                "9/18/2025 from 1:31 AM to 3:02 PM?"
+            ),
+            QuestionType.CHRONOLOGY,
+        )
+
     def test_recapture_hides_superseded_observations(self) -> None:
         self._write_export(
             [{"id": "one", "timestamp": "2026-01-01T00:00:00Z", "content": "Revised scene"}]

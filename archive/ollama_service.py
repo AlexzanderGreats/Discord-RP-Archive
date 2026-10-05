@@ -4,11 +4,12 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from archive.reader_service import ReaderService
 from archive.search_service import SearchService
@@ -41,7 +42,53 @@ class QuestionType(str, Enum):
     ATTRIBUTION = "attribution"
 
 
+_QUESTION_TIME_RANGE = re.compile(
+    r"(?P<date>\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{1,2}-\d{1,2})\b)"
+    r"\s+from\s+(?P<start>\d{1,2}:\d{2}\s*[AP]M)"
+    r"\s+to\s+(?P<end>\d{1,2}:\d{2}\s*[AP]M)",
+    re.IGNORECASE,
+)
+_ARCHIVE_TIMEZONE = ZoneInfo("America/Los_Angeles")
+
+
+def _question_time_range(question: str) -> tuple[tuple[str, str], str] | None:
+    match = _QUESTION_TIME_RANGE.search(question)
+    if match is None:
+        return None
+
+    date_value = match.group("date")
+    date_formats = ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d")
+    parsed_date = None
+    for date_format in date_formats:
+        try:
+            parsed_date = datetime.strptime(date_value, date_format).date()
+            break
+        except ValueError:
+            continue
+    if parsed_date is None:
+        return None
+
+    try:
+        start_time = datetime.strptime(match.group("start").upper().replace(" ", ""), "%I:%M%p").time()
+        end_time = datetime.strptime(match.group("end").upper().replace(" ", ""), "%I:%M%p").time()
+    except ValueError:
+        return None
+
+    start_local = datetime.combine(parsed_date, start_time)
+    end_local = datetime.combine(parsed_date, end_time) + timedelta(minutes=1)
+    if end_local <= start_local:
+        return None
+    start = start_local.replace(tzinfo=_ARCHIVE_TIMEZONE).astimezone(timezone.utc)
+    end = end_local.replace(tzinfo=_ARCHIVE_TIMEZONE).astimezone(timezone.utc)
+    return (
+        start.isoformat(timespec="seconds"),
+        end.isoformat(timespec="seconds"),
+    ), question[:match.start()] + question[match.end():]
+
+
 def classify_question(question: str) -> QuestionType:
+    if _question_time_range(question) is not None:
+        return QuestionType.CHRONOLOGY
     normalized = question.casefold()
     if re.search(
         r"\b(who (?:said|wrote|created|played)|who is .* played by|author|attribut(?:e|ion))\b",
@@ -208,14 +255,32 @@ class ArchiveAnswerService:
     def retrieve(self, question: str, *, limit: int = 8) -> list[dict[str, Any]]:
         if limit < 1:
             raise ValueError("limit must be greater than zero")
+        requested_range = _question_time_range(question)
+        search_question = question
+        time_bounds = None
+        if requested_range is not None:
+            time_bounds, search_question = requested_range
         question_type = classify_question(question)
         broad_types = {QuestionType.CHRONOLOGY, QuestionType.SYNTHESIS, QuestionType.RESEARCH}
         candidate_limit = min(max(limit * 8, 32), 256) if question_type in broad_types else limit
-        matches = self.search_service.search_relevant(question, limit=candidate_limit)
+        matches = self.search_service.search_relevant(
+            search_question,
+            limit=candidate_limit,
+            **(
+                {
+                    "start_timestamp_utc": time_bounds[0],
+                    "end_timestamp_utc": time_bounds[1],
+                }
+                if time_bounds is not None
+                else {}
+            ),
+        )
         if not matches:
             return []
 
-        if question_type in broad_types:
+        if time_bounds is not None:
+            anchors = self._select_range_anchors(matches, limit=limit)
+        elif question_type in broad_types:
             anchors = self._select_temporal_anchors(matches, limit=limit)
         else:
             channel_scores: dict[int | None, float] = {}
@@ -246,6 +311,11 @@ class ArchiveAnswerService:
                     continue
                 if observation_id in seen_ids:
                     continue
+                timestamp = item.get("timestamp_utc")
+                if time_bounds is not None and (
+                    timestamp is None or not time_bounds[0] <= timestamp < time_bounds[1]
+                ):
+                    continue
                 seen_ids.add(observation_id)
                 record = dict(item)
                 record["context_relation"] = relation
@@ -257,6 +327,29 @@ class ArchiveAnswerService:
             evidence,
             key=lambda item: (item.get("timestamp_utc") or "", item["message_observation_id"]),
         )
+
+    @staticmethod
+    def _select_range_anchors(
+        matches: list[dict[str, Any]], *, limit: int
+    ) -> list[dict[str, Any]]:
+        channel_scores: dict[int | None, float] = {}
+        for match in matches:
+            channel_id = match.get("channel_id")
+            channel_scores[channel_id] = channel_scores.get(channel_id, 0) + match.get(
+                "relevance_score", 0
+            )
+        best_channel_id = max(channel_scores, key=channel_scores.__getitem__)
+        channel_matches = sorted(
+            (match for match in matches if match.get("channel_id") == best_channel_id),
+            key=lambda item: (item.get("timestamp_utc") or "", item["message_observation_id"]),
+        )
+        if len(channel_matches) <= limit:
+            return channel_matches
+        indexes = [
+            round(index * (len(channel_matches) - 1) / (limit - 1))
+            for index in range(limit)
+        ] if limit > 1 else [len(channel_matches) // 2]
+        return [channel_matches[index] for index in indexes]
 
     @staticmethod
     def _select_temporal_anchors(
