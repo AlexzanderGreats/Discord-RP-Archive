@@ -35,6 +35,9 @@ provisional_identity_candidates
 identity_candidate_evidence
 identity_candidate_review_events
 identity_candidate_evidence_overrides
+attribution_confidence_runs
+attribution_confidence_candidates
+attribution_confidence_evidence
 documents
 document_chunks
 document_entries
@@ -42,7 +45,7 @@ schema_migrations
 ```
 
 This is the migration-backed schema used by both the Discord JSON and document
-importers (version 018). Databases at earlier versions require explicit
+importers (version 019). Databases at earlier versions require explicit
 migrations before they can use boundary persistence, candidate segmentation,
 or identity candidate inference.
 
@@ -58,6 +61,11 @@ Migration 018 adds independent speaker identity inference runs, provisional
 identity candidates, per-message evidence, reviewer decisions, and durable
 evidence overrides. These records do not create characters or players, write
 to `message_attributions`, or assign scene membership.
+
+Migration 019 adds versioned attribution-confidence runs, ranked per-message
+candidate snapshots, and evidence contributions. It reads Phase E evidence and
+existing attribution decisions but does not change either source or write
+authoritative attribution.
 
 Scene curation is implemented in migration 015. Scene membership is explicit
 and ordered through `scene_messages`; `scene_channels` is a view of the distinct
@@ -607,6 +615,38 @@ Migration 018 introduces:
 Provisional identity evidence references messages, not candidate spans.
 Later reconstruction can associate it with spans through message membership
 without making attribution dependent on segmentation.
+
+## Attribution confidence tables
+
+Migration 019 introduces:
+
+- `attribution_confidence_runs`: source identity-inference run, ruleset and
+  canonical configuration, input scope/fingerprint, status, timestamps, and
+  statistics.
+- `attribution_confidence_candidates`: one ranked character, provisional
+  identity, or unresolved candidate for a message. It stores integer
+  operational score (or `NULL` when unknown), margin, classification,
+  review priority, mandatory-review flag/reasons, and a snapshot of any
+  existing attribution decision.
+- `attribution_confidence_evidence`: supporting, contradictory, or contextual
+  contributions with integer weight/contribution, source message IDs, Phase E
+  inference/evidence IDs, existing attribution IDs, review-event IDs, and
+  explanatory JSON.
+
+Scores are evidence units, not probabilities. The initial ruleset counts one
+point per distinct matching message-level speaker-label observation. An
+existing reviewed rejection or a competing accepted attribution contributes a
+one-point penalty. Repetition is grouped only by normalized label and known
+server. Three points and a two-point lead are required for the
+`high_confidence` triage class; this threshold is conservative and not
+calibrated. Ambiguous alias matches preserve every character alternative.
+`high_confidence` never means accepted. Pending proposals are context only;
+player-only claims, ordinary prose, name mentions, raw author identity, and
+boundary scores do not contribute to character scores.
+
+The authoritative review decision remains in `message_attributions` with its
+append-only `attribution_events`. Confidence runs snapshot that state and
+cannot supersede or update it.
 
 ## Relationship Summary
 

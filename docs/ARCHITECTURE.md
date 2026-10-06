@@ -256,6 +256,47 @@ reconstruction can later join identity evidence to whichever candidate
 memberships it reviews without making identity inference depend on
 segmentation.
 
+## Attribution Confidence (Implemented)
+
+`archive/attribution_confidence.py` aggregates persisted Phase E
+`identity_candidate_evidence` into per-message character candidates and
+alternatives. The default ruleset is `attribution_confidence_v1`. Scores are
+integer evidence units, not probabilities: each distinct matching
+message-level speaker-label observation contributes one point. Same-label
+evidence is combined only within a known server. An existing reviewed
+rejection or a conflicting accepted attribution contributes a one-point
+contradiction penalty. A provisional identity linked to a registered
+character contributes human-reviewed evidence but remains `review_required`;
+it does not become a message attribution.
+
+Three evidence units and at least a two-point lead are required for
+`high_confidence`. Multiple plausible character matches remain `ambiguous`;
+unmatched provisional labels and messages without usable evidence remain
+`unresolved`; a current human decision that conflicts with new evidence is
+`conflicted`. `review_required`, `ambiguous`, `unresolved`, and `conflicted`
+are mandatory-review states. `high_confidence` is only an operational
+triage class and never auto-accepts a claim. Existing pending proposals are
+retained as zero-weight context; accepted/rejected decisions and their audit
+events remain authoritative in `message_attributions` and
+`attribution_events`.
+
+Migration 019 stores confidence snapshots and per-message/candidate
+supporting, contradictory, and contextual contributions. Each contribution
+retains message, Phase E run/evidence, and existing attribution/review-event
+provenance. Runs record canonical configuration, input scope, fingerprint,
+status, timestamps, and statistics. No player score is calculated: speaker
+labels, raw Discord identity, character mentions, natural-language prose, and
+boundary scores do not establish player attribution or character
+participation.
+
+The thresholds are conservative initial triage settings, not calibrated
+against reviewed archive examples. In the read-only archive inspection,
+171,711 current messages yielded two provisional speaker-marker observations,
+neither repeated; there were no registered characters or aliases, attribution
+claims or audit events, Discord-player identity links, or player-character
+mappings. The archive therefore supplies no reviewed examples to calibrate
+character confidence scores.
+
 ## Pipeline Overview
 
 The implemented flow can be represented as:
@@ -706,8 +747,9 @@ remains deferred to the Reader/search layer.
 
 There is no implemented reader UI, search CLI/API, or backup workflow.
 Automated identity inference is limited to explicit header labels and
-registered-alias lookup; it does not infer identity from natural-language
-content or infer players from speaker labels. The empty `database.py`,
+registered-alias lookup; confidence ranking uses only those Phase E records
+and reviewed attribution outcomes. It does not infer identity from
+natural-language content or infer players from speaker labels. The empty `database.py`,
 `discord_parser.py`, and `validator.py` files do not own the importer logic;
 Discord and document ingestion remain concentrated in `build_archive.py` and
 `document_parser.py`.
