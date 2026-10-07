@@ -70,12 +70,12 @@ class MigrationTests(unittest.TestCase):
         self.connection.close()
 
     def test_migrations_preserve_legacy_rows_and_are_repeatable(self) -> None:
-        self.assertEqual(run_migrations(self.connection), 20)
+        self.assertEqual(run_migrations(self.connection), 21)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM document_chunks").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM legacy_document_entries").fetchone()[0], 1)
-        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 20)
+        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 21)
         tables = {
             row[0]
             for row in self.connection.execute(
@@ -101,6 +101,7 @@ class MigrationTests(unittest.TestCase):
                 "attribution_confidence_runs", "attribution_confidence_candidates",
                 "attribution_confidence_evidence",
                 "attribution_review_events", "attribution_review_decisions",
+                "attribution_review_evidence_overrides", "attribution_review_input_changes",
             },
         )
         message_columns = {
@@ -112,7 +113,7 @@ class MigrationTests(unittest.TestCase):
             "SELECT document_id, entry_index, content_text FROM document_entries"
         ).fetchone()
         self.assertEqual(tuple(migrated_entry), (7, 0, ""))
-        self.assertEqual(run_migrations(self.connection), 20)
+        self.assertEqual(run_migrations(self.connection), 21)
 
     def test_changed_applied_migration_is_rejected(self) -> None:
         run_migrations(self.connection)
@@ -130,10 +131,14 @@ class MigrationTests(unittest.TestCase):
             ("25439f9cbd3bb2e571d275b8a7121a2e47e998d1b4abb1a61e93723eaf3b3aa5",),
         )
 
-        self.assertEqual(run_migrations(self.connection), 20)
+        self.assertEqual(run_migrations(self.connection), 21)
 
     def test_candidate_migrations_upgrade_a_version_15_database(self) -> None:
         run_migrations(self.connection)
+        self.connection.execute("DROP TABLE attribution_review_evidence_overrides")
+        self.connection.execute("DROP TABLE attribution_review_input_changes")
+        self._drop_attribution_review_input_triggers()
+        self.connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         self.connection.execute("DROP TABLE attribution_review_decisions")
         self.connection.execute("DROP TABLE attribution_review_events")
         self.connection.execute("DELETE FROM schema_migrations WHERE version = 20")
@@ -159,7 +164,7 @@ class MigrationTests(unittest.TestCase):
         self.connection.execute("DELETE FROM schema_migrations WHERE version = 16")
         self.connection.commit()
 
-        self.assertEqual(run_migrations(self.connection), 20)
+        self.assertEqual(run_migrations(self.connection), 21)
         self.assertIsNotNone(
             self.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'candidate_spans'"
@@ -181,6 +186,10 @@ class MigrationTests(unittest.TestCase):
 
     def test_review_migrations_upgrade_a_version_18_database(self) -> None:
         run_migrations(self.connection)
+        self.connection.execute("DROP TABLE attribution_review_evidence_overrides")
+        self.connection.execute("DROP TABLE attribution_review_input_changes")
+        self._drop_attribution_review_input_triggers()
+        self.connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         self.connection.execute("DROP TABLE attribution_review_decisions")
         self.connection.execute("DROP TABLE attribution_review_events")
         self.connection.execute("DELETE FROM schema_migrations WHERE version = 20")
@@ -190,7 +199,7 @@ class MigrationTests(unittest.TestCase):
         self.connection.execute("DELETE FROM schema_migrations WHERE version = 19")
         self.connection.commit()
 
-        self.assertEqual(run_migrations(self.connection), 20)
+        self.assertEqual(run_migrations(self.connection), 21)
         self.assertIsNotNone(
             self.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
@@ -204,6 +213,40 @@ class MigrationTests(unittest.TestCase):
             ).fetchone()
         )
         self.assertEqual(self.connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_hardening_migration_upgrades_version_19_directly(self) -> None:
+        run_migrations(self.connection)
+        self.connection.execute("DROP TABLE attribution_review_evidence_overrides")
+        self.connection.execute("DROP TABLE attribution_review_input_changes")
+        self._drop_attribution_review_input_triggers()
+        self.connection.execute("DELETE FROM schema_migrations WHERE version = 21")
+        self.connection.execute("DROP TABLE attribution_review_decisions")
+        self.connection.execute("DROP TABLE attribution_review_events")
+        self.connection.execute("DELETE FROM schema_migrations WHERE version = 20")
+        self.connection.commit()
+
+        self.assertEqual(run_migrations(self.connection), 21)
+        self.assertIsNotNone(
+            self.connection.execute(
+                "SELECT 1 FROM pragma_table_info('attribution_review_events') "
+                "WHERE name = 'previous_state_json'"
+            ).fetchone()
+        )
+        self.assertEqual(self.connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def _drop_attribution_review_input_triggers(self) -> None:
+        for trigger in (
+            "attribution_review_alias_insert",
+            "attribution_review_alias_update",
+            "attribution_review_alias_delete",
+            "attribution_review_player_identity_insert",
+            "attribution_review_player_identity_update",
+            "attribution_review_player_identity_delete",
+            "attribution_review_player_character_insert",
+            "attribution_review_player_character_update",
+            "attribution_review_player_character_delete",
+        ):
+            self.connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
 
     def test_recaptures_preserve_observations_and_advance_accepted_capture(self) -> None:
         from archive.provenance import (

@@ -301,23 +301,29 @@ character confidence scores.
 
 `archive/attribution_review.py` supplies a GUI-neutral read model and action
 API over completed Phase F1 snapshots. The review queue prioritizes
-high/normal/low work, includes current candidates and their evidence, and marks
-snapshots stale if a newer inference/confidence result or relevant human
-review has changed the inputs. Actions against stale snapshots are rejected so
-reviewers must refresh first.
+high/normal/low work, includes current candidates, their evidence, and current
+authoritative attributions, and distinguishes `review_required`,
+`already_resolved`, `unresolved`, `conflicted`, `excluded`, and stale results.
+A decision is not hidden when newer recommendations conflict with it.
+Snapshots are marked stale after newer inference/confidence results,
+alias/mapping changes, relevant human review, or newly imported messages in
+scope. Actions against stale snapshots are rejected, except that an explicit
+restoration action can reverse the current evidence exclusion.
 
 Confirm and assign-character actions create or accept an audited manual
 attribution. Reject records a rejected manual claim; if that character is
 already accepted, F2 records a conflict without silently revoking it.
 Leave-unresolved is an explicit durable review state. Linking a provisional
 identity updates only the identity mapping and does not create a message
-attribution. Split, reassign, exclude, and merge operations reuse Phase E's
-immutable identity-review events and persistent per-message evidence
-overrides.
+attribution. Split, reassign, and merge operations reuse Phase E's immutable
+identity-review events and persistent per-message evidence overrides.
+Exclusion is a separate reversible F2 message-level override, applicable to
+registered or provisional marker evidence; raw observations remain untouched.
 
 F2 records each action in append-only `attribution_review_events`, with
 reviewer, timestamp, optional note, source F1 candidate/evidence fingerprint,
-and linked authoritative attribution or identity-review event. The mutable
+prior-state snapshot, and linked authoritative attribution or identity-review
+event. The mutable
 `attribution_review_decisions` table is a current-state projection; it does
 not replace audit history. Bulk attribution review is allowed only when every
 selected message has the same candidate and matching evidence fingerprint.

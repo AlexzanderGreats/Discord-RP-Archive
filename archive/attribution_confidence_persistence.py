@@ -61,6 +61,8 @@ def _fetch_evidence(
                          AND review_event.linked_character_id = provisional.linked_character_id
                    ), '[]') AS candidate_link_review_event_ids_json
             FROM identity_candidate_evidence evidence
+            LEFT JOIN attribution_review_evidence_overrides review_override
+              ON review_override.message_observation_id = evidence.message_observation_id
             LEFT JOIN identity_candidate_evidence_overrides override
               ON override.message_observation_id = evidence.message_observation_id
             LEFT JOIN provisional_identity_candidates provisional
@@ -70,6 +72,7 @@ def _fetch_evidence(
             WHERE evidence.identity_inference_run_id = ?
               AND evidence.message_observation_id IN ({placeholders})
               AND COALESCE(override.is_excluded, 0) = 0
+              AND COALESCE(review_override.is_excluded, 0) = 0
             ORDER BY evidence.message_observation_id, evidence.evidence_id""",
         (run_id, *message_ids),
     ).fetchall()

@@ -29,14 +29,17 @@ ReviewAction = Literal[
     "reassign_evidence",
     "exclude_evidence",
     "merge_candidates",
+    "restore_evidence",
 ]
 _VALID_ACTIONS = {
     "confirm", "assign_character", "reject", "leave_unresolved",
     "link_provisional", "split_evidence", "reassign_evidence",
-    "exclude_evidence", "merge_candidates",
+    "exclude_evidence", "merge_candidates", "restore_evidence",
 }
 _CHARACTER_ACTIONS = {"confirm", "assign_character", "reject"}
-_EVIDENCE_ACTIONS = {"split_evidence", "reassign_evidence", "exclude_evidence"}
+_EVIDENCE_ACTIONS = {
+    "split_evidence", "reassign_evidence", "exclude_evidence", "restore_evidence"
+}
 
 
 def _now() -> str:
@@ -59,7 +62,7 @@ def _confidence_run(
 ) -> sqlite3.Row:
     row = connection.execute(
         """SELECT attribution_confidence_run_id, identity_inference_run_id,
-                  started_at, status
+                  started_at, status, ruleset_version, input_scope_json
            FROM attribution_confidence_runs
            WHERE attribution_confidence_run_id = ?""",
         (confidence_run_id,),
@@ -75,9 +78,49 @@ def _is_stale(
     connection: sqlite3.Connection,
     confidence_run: sqlite3.Row,
     message_id: int,
+    *,
+    allow_excluded_evidence: bool = False,
 ) -> bool:
     run_id = int(confidence_run["attribution_confidence_run_id"])
     source_identity_run_id = int(confidence_run["identity_inference_run_id"])
+    if confidence_run["ruleset_version"] != "attribution_confidence_v1":
+        return True
+    if not allow_excluded_evidence and connection.execute(
+        """SELECT 1 FROM attribution_review_input_changes
+           WHERE julianday(changed_at) > julianday(?) LIMIT 1""",
+        (confidence_run["started_at"],),
+    ).fetchone() is not None:
+        return True
+    scope = json.loads(confidence_run["input_scope_json"])
+    scoped_message_ids = scope.get("message_observation_ids", [])
+    if scoped_message_ids:
+        latest_input_id = max(scoped_message_ids)
+        parameters: list[Any] = [latest_input_id]
+        query = """SELECT 1 FROM messages message
+                   WHERE message.message_observation_id > ?"""
+        if scope.get("server_id") is not None:
+            query += """ AND EXISTS (
+                SELECT 1 FROM channels channel
+                WHERE channel.channel_id = message.channel_id AND channel.server_id = ?
+            )"""
+            parameters.append(scope["server_id"])
+        if scope.get("channel_id") is not None:
+            query += " AND message.channel_id = ?"
+            parameters.append(scope["channel_id"])
+        query += " LIMIT 1"
+        if connection.execute(query, parameters).fetchone() is not None:
+            return True
+    if connection.execute(
+        """SELECT 1
+           FROM attribution_review_evidence_overrides override
+           JOIN attribution_review_events event
+             ON event.attribution_review_event_id = override.review_event_id
+           WHERE override.message_observation_id = ?
+             AND julianday(event.happened_at) > julianday(?)
+           LIMIT 1""",
+        (message_id, confidence_run["started_at"]),
+    ).fetchone() is not None:
+        return True
     later_confidence = connection.execute(
         """SELECT 1
            FROM attribution_confidence_candidates candidate
@@ -225,7 +268,8 @@ def list_attribution_review_queue(
             dict(row)
             for row in connection.execute(
                 """SELECT decision.*, event.action, event.actor, event.happened_at,
-                          event.note
+                          event.note,
+                          event.detail_json
                    FROM attribution_review_decisions decision
                    JOIN attribution_review_events event
                      ON event.attribution_review_event_id = decision.latest_event_id
@@ -234,20 +278,47 @@ def list_attribution_review_queue(
                 (message_id,),
             )
         ]
-        message_decided = any(
-            row["status"] in {"accepted", "unresolved"} for row in decisions
-        )
+        authoritative = [
+            dict(row)
+            for row in connection.execute(
+                """SELECT attribution.attribution_id, attribution.character_id,
+                          character.character_name, attribution.player_id,
+                          player.player_name, attribution.method, attribution.status,
+                          attribution.reviewed_by, attribution.reviewed_at,
+                          attribution.review_note
+                   FROM message_attributions attribution
+                   LEFT JOIN characters character ON character.character_id = attribution.character_id
+                   LEFT JOIN players player ON player.player_id = attribution.player_id
+                   WHERE attribution.message_observation_id = ?
+                     AND attribution.status IN ('accepted', 'rejected', 'pending')
+                   ORDER BY attribution.attribution_id""",
+                (message_id,),
+            )
+        ]
         stale = _is_stale(connection, confidence_run, message_id)
-        if message_decided and not include_decided:
+        excluded = connection.execute(
+            """SELECT is_excluded FROM attribution_review_evidence_overrides
+               WHERE message_observation_id = ?""",
+            (message_id,),
+        ).fetchone()
+        is_excluded = excluded is not None and bool(excluded["is_excluded"])
+        has_conflict = (
+            any(item["status"] == "conflicted" for item in decisions)
+            or any(item["classification"] == "conflicted" for item in candidates)
+        )
+        has_resolved = any(
+            item["status"] in {"accepted", "unresolved"} for item in decisions
+        )
+        if not include_decided and has_resolved and not has_conflict and not stale:
             continue
         needs_review = (
             any(candidate["mandatory_review"] for candidate in candidates)
             or any(candidate["classification"] in {"conflicted", "unresolved"} for candidate in candidates)
         )
-        if not needs_review and not include_decided:
+        if not needs_review and not include_decided and not stale and not is_excluded:
             continue
         current_priority = (
-            "high" if stale else
+            "high" if stale or has_conflict else
             min((candidate["review_priority"] for candidate in candidates),
                 key=lambda item: priority_rank[item])
         )
@@ -257,18 +328,26 @@ def list_attribution_review_queue(
             **headers[message_id],
             "confidence_run_id": confidence_run_id,
             "identity_inference_run_id": int(confidence_run["identity_inference_run_id"]),
-            "state": "stale" if stale else (
-                "accepted" if any(item["status"] == "accepted" for item in decisions)
+            "state": "conflicted" if has_conflict else (
+                "excluded" if is_excluded else "stale" if stale else
+                "already_resolved" if any(item["status"] == "accepted" for item in decisions)
                 else "unresolved" if any(item["status"] == "unresolved" for item in decisions)
-                else "conflicted" if (
-                    any(item["status"] == "conflicted" for item in decisions)
-                    or any(item["classification"] == "conflicted" for item in candidates)
+                else "unresolved" if any(
+                    item["candidate_kind"] in {"provisional_identity", "unresolved"}
+                    for item in candidates
                 )
-                else "in_review" if decisions else "queued"
+                else "review_required" if needs_review else "already_resolved"
+            ),
+            "reviewed": bool(decisions),
+            "human_decision_status": (
+                "unresolved" if any(item["status"] == "unresolved" for item in decisions)
+                else "accepted" if any(item["status"] == "accepted" for item in decisions)
+                else None
             ),
             "review_priority": current_priority,
             "stale": stale,
             "decisions": decisions,
+            "authoritative_attributions": authoritative,
             "candidates": candidates,
         })
     queue.sort(key=lambda item: (
@@ -301,6 +380,187 @@ def list_attribution_review_history(
     ).fetchall()
 
 
+def get_attribution_review_candidate(
+    connection: sqlite3.Connection,
+    confidence_candidate_id: int,
+    *,
+    representative_message_limit: int = 5,
+) -> dict[str, Any]:
+    """Return a candidate-centered read model for a future review client."""
+    confidence_candidate_id = _positive_id(confidence_candidate_id, "confidence_candidate_id")
+    if (
+        isinstance(representative_message_limit, bool)
+        or not isinstance(representative_message_limit, int)
+        or representative_message_limit < 1
+    ):
+        raise ValueError("representative_message_limit must be a positive integer")
+    selected = connection.execute(
+        """SELECT candidate.*, run.identity_inference_run_id,
+                  run.ruleset_version, run.input_fingerprint, run.status AS run_status
+           FROM attribution_confidence_candidates candidate
+           JOIN attribution_confidence_runs run
+             ON run.attribution_confidence_run_id = candidate.attribution_confidence_run_id
+           WHERE candidate.attribution_confidence_candidate_id = ?""",
+        (confidence_candidate_id,),
+    ).fetchone()
+    if selected is None:
+        raise ValueError(f"Confidence candidate {confidence_candidate_id} does not exist")
+
+    run_id = int(selected["attribution_confidence_run_id"])
+    candidate_kind = str(selected["candidate_kind"])
+    if candidate_kind == "character":
+        key_column, key_value = "character_id", selected["character_id"]
+    elif candidate_kind == "provisional_identity":
+        key_column, key_value = "provisional_identity_candidate_id", selected[
+            "provisional_identity_candidate_id"
+        ]
+    else:
+        key_column, key_value = "message_observation_id", selected["message_observation_id"]
+    candidate_rows = connection.execute(
+        f"""SELECT * FROM attribution_confidence_candidates
+            WHERE attribution_confidence_run_id = ? AND candidate_kind = ?
+              AND {key_column} IS ?
+            ORDER BY message_observation_id, candidate_rank""",
+        (run_id, candidate_kind, key_value),
+    ).fetchall()
+    if candidate_kind in {"character", "provisional_identity"}:
+        selected_signature = _candidate_evidence_signature(
+            connection, confidence_candidate_id
+        )
+        candidate_rows = [
+            row for row in candidate_rows
+            if _candidate_evidence_signature(
+                connection, int(row["attribution_confidence_candidate_id"])
+            ) == selected_signature
+        ]
+    else:
+        candidate_rows = [selected]
+    message_ids = tuple(sorted({int(row["message_observation_id"]) for row in candidate_rows}))
+    placeholders = ",".join("?" for _ in message_ids)
+    messages = connection.execute(
+        f"""SELECT message.message_observation_id, message.discord_message_id,
+                   message.timestamp_utc, message.content_original,
+                   message.author_discord_user_id_original,
+                   channel.name_current AS channel_name,
+                   server.name_current AS server_name
+            FROM messages message
+            LEFT JOIN channels channel ON channel.channel_id = message.channel_id
+            LEFT JOIN servers server ON server.server_id = channel.server_id
+            WHERE message.message_observation_id IN ({placeholders})
+            ORDER BY message.timestamp_utc, message.message_observation_id""",
+        message_ids,
+    ).fetchall()
+    message_records = [dict(row) for row in messages]
+    current = dict(selected)
+    current["evidence"] = [
+        dict(row)
+        for row in list_attribution_confidence_evidence(
+            connection, confidence_candidate_id
+        )
+    ]
+    message_id = int(selected["message_observation_id"])
+    alternatives = [
+        dict(row)
+        for row in connection.execute(
+            """SELECT candidate.*, character.character_name,
+                      provisional.display_label AS provisional_label
+               FROM attribution_confidence_candidates candidate
+               LEFT JOIN characters character ON character.character_id = candidate.character_id
+               LEFT JOIN provisional_identity_candidates provisional
+                 ON provisional.candidate_id = candidate.provisional_identity_candidate_id
+               WHERE candidate.attribution_confidence_run_id = ?
+                 AND candidate.message_observation_id = ?
+               ORDER BY candidate.candidate_rank""",
+            (run_id, message_id),
+        )
+    ]
+    decisions = [
+        dict(row)
+        for row in connection.execute(
+            """SELECT decision.*, event.action, event.actor, event.happened_at,
+                      event.note, event.previous_state_json
+               FROM attribution_review_decisions decision
+               JOIN attribution_review_events event
+                 ON event.attribution_review_event_id = decision.latest_event_id
+               WHERE decision.message_observation_id IN ("""
+            + placeholders
+            + """) ORDER BY event.attribution_review_event_id""",
+            message_ids,
+        )
+    ]
+    history = [
+        dict(row)
+        for item_id in message_ids
+        for row in list_attribution_review_history(connection, item_id)
+    ]
+    authoritative = [
+        dict(row)
+        for row in connection.execute(
+            f"""SELECT attribution.message_observation_id, attribution.attribution_id,
+                       attribution.character_id, character.character_name,
+                       attribution.player_id, player.player_name, attribution.method,
+                       attribution.status, attribution.reviewed_by,
+                       attribution.reviewed_at, attribution.review_note
+                FROM message_attributions attribution
+                LEFT JOIN characters character ON character.character_id = attribution.character_id
+                LEFT JOIN players player ON player.player_id = attribution.player_id
+                WHERE attribution.message_observation_id IN ({placeholders})
+                  AND attribution.status IN ('accepted', 'rejected', 'pending')
+                ORDER BY attribution.message_observation_id, attribution.attribution_id""",
+            message_ids,
+        )
+    ]
+    selected_message = next(
+        (item for item in message_records if item["message_observation_id"] == message_id),
+        None,
+    )
+    exclusion = connection.execute(
+        """SELECT is_excluded FROM attribution_review_evidence_overrides
+           WHERE message_observation_id = ?""",
+        (message_id,),
+    ).fetchone()
+    current["excluded"] = exclusion is not None and bool(exclusion["is_excluded"])
+    current["stale"] = _is_stale(
+        connection,
+        _confidence_run(connection, run_id),
+        message_id,
+    )
+    return {
+        "candidate": current,
+        "candidate_type": candidate_kind,
+        "current_review_state": (
+            "excluded" if current["excluded"]
+            else "stale" if current["stale"]
+            else "conflicted" if current["classification"] == "conflicted"
+            else "review_required" if current["mandatory_review"]
+            else "already_resolved"
+        ),
+        "recommended_character_id": selected["character_id"],
+        "alternatives": alternatives,
+        "operational_confidence": selected["classification"],
+        "review_priority": selected["review_priority"],
+        "supporting_evidence": [
+            item for item in current["evidence"] if item["direction"] == "supporting"
+        ],
+        "contradictory_evidence": [
+            item for item in current["evidence"] if item["direction"] == "contradictory"
+        ],
+        "affected_message_count": len(message_ids),
+        "affected_message_ids": list(message_ids),
+        "representative_messages": message_records[:representative_message_limit],
+        "selected_message": selected_message,
+        "source": {
+            "confidence_run_id": run_id,
+            "identity_inference_run_id": int(selected["identity_inference_run_id"]),
+            "ruleset_version": selected["ruleset_version"],
+            "input_fingerprint": selected["input_fingerprint"],
+        },
+        "previous_human_decisions": decisions,
+        "current_authoritative_attributions": authoritative,
+        "audit_history": history,
+    }
+
+
 def _upsert_decision(
     connection: sqlite3.Connection,
     *,
@@ -315,10 +575,10 @@ def _upsert_decision(
     if status == "accepted":
         connection.execute(
             """UPDATE attribution_review_decisions
-               SET status = 'superseded', latest_event_id = ?, updated_at = ?
+               SET status = 'superseded', updated_at = ?
                WHERE message_observation_id = ? AND candidate_kind = 'character'
                  AND status = 'accepted' AND character_id != ?""",
-            (event_id, now, message_id, character_id),
+            (now, message_id, character_id),
         )
     existing = connection.execute(
         """SELECT attribution_review_decision_id
@@ -421,7 +681,13 @@ def review_attribution_candidate(
     if primary_message_id not in message_ids:
         raise ValueError("Bulk message IDs must include the selected candidate's message")
     confidence_run = _confidence_run(connection, confidence_run_id)
-    if any(_is_stale(connection, confidence_run, message_id) for message_id in message_ids):
+    if any(
+        _is_stale(
+            connection, confidence_run, message_id,
+            allow_excluded_evidence=action == "restore_evidence",
+        )
+        for message_id in message_ids
+    ):
         raise ValueError("Attribution review input is stale; recompute F1 before reviewing")
     matched_candidates = (
         _check_bulk_equivalence(connection, confidence_run_id, first, message_ids)
@@ -468,7 +734,7 @@ def review_attribution_candidate(
         ).fetchone() is None:
             raise ValueError(f"Character {character_id} does not exist")
     elif action in _EVIDENCE_ACTIONS:
-        if first["candidate_kind"] != "provisional_identity":
+        if action not in {"exclude_evidence", "restore_evidence"} and first["candidate_kind"] != "provisional_identity":
             raise ValueError(f"{action} requires a provisional identity candidate")
         if action == "reassign_evidence":
             if target_candidate_id is None:
@@ -486,10 +752,21 @@ def review_attribution_candidate(
     if action in {"split_evidence", "reassign_evidence", "exclude_evidence", "merge_candidates"}:
         if not message_ids:
             raise ValueError(f"{action} requires at least one message")
+    if action == "restore_evidence":
+        if not message_ids or any(
+            (row := connection.execute(
+                """SELECT is_excluded FROM attribution_review_evidence_overrides
+                   WHERE message_observation_id = ?""",
+                (message_id,),
+            ).fetchone()) is None or not row["is_excluded"]
+            for message_id in message_ids
+        ):
+            raise ValueError("restore_evidence requires excluded evidence for every selected message")
 
     identity_review_event_id: int | None = None
     resulting_candidate_id: int | None = None
     affected_ids = message_ids
+    operation_savepoint = "attribution_review_action"
     connection.execute("SAVEPOINT attribution_review_action")
     try:
         if action == "link_provisional":
@@ -504,7 +781,7 @@ def review_attribution_candidate(
                 (source_candidate_id,),
             ).fetchone()
             identity_review_event_id = int(latest_event[0])
-        elif action in _EVIDENCE_ACTIONS:
+        elif action in {"split_evidence", "reassign_evidence"}:
             source_candidate_id = int(first["provisional_identity_candidate_id"])
             if action == "split_evidence":
                 resulting_candidate_id = review_identity_candidate(
@@ -589,6 +866,31 @@ def review_attribution_candidate(
             )
             source_fingerprint = _candidate_evidence_signature(connection, selected_candidate_id)
             attribution_id: int | None = None
+            previous_state = {
+                "review_decisions": [
+                    dict(row)
+                    for row in connection.execute(
+                        """SELECT candidate_kind, character_id, provisional_candidate_id,
+                                  status, latest_event_id
+                           FROM attribution_review_decisions
+                           WHERE message_observation_id = ?
+                           ORDER BY attribution_review_decision_id""",
+                        (message_id,),
+                    )
+                ],
+                "authoritative_attributions": [
+                    dict(row)
+                    for row in connection.execute(
+                        """SELECT attribution_id, character_id, player_id, status,
+                                  method, reviewed_by, reviewed_at, review_note
+                           FROM message_attributions
+                           WHERE message_observation_id = ?
+                             AND status IN ('accepted', 'rejected', 'pending')
+                           ORDER BY attribution_id""",
+                        (message_id,),
+                    )
+                ],
+            }
             outcome: str
             decision_kind = selected_kind
             decision_character_id = selected_character_id
@@ -699,6 +1001,7 @@ def review_attribution_candidate(
             if action != "link_provisional":
                 event_character_id = decision_character_id
 
+            persisted_action = "exclude_evidence" if action == "restore_evidence" else action
             event_cursor = connection.execute(
                 """INSERT INTO attribution_review_events(
                        review_group_id, message_observation_id, action, outcome,
@@ -706,22 +1009,37 @@ def review_attribution_candidate(
                        confidence_candidate_id, character_id,
                        provisional_candidate_id, target_candidate_id,
                        attribution_id, identity_review_event_id,
-                       source_evidence_fingerprint, detail_json
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       source_evidence_fingerprint, detail_json, previous_state_json,
+                       requested_action
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    group_id, message_id, action, outcome, actor.strip(), now, note,
+                    group_id, message_id, persisted_action, outcome, actor.strip(), now, note,
                     confidence_run_id, selected_candidate_id,
                     event_character_id, selected_provisional_id,
                     resulting_candidate_id or target_candidate_id,
                     attribution_id, identity_review_event_id, source_fingerprint,
                     _canonical_json({
+                        "requested_action": action,
                         "affected_message_observation_ids": list(affected_ids),
                         "identity_review_event_id": identity_review_event_id,
                         "target_candidate_id": target_candidate_id,
                     }),
+                    _canonical_json(previous_state),
+                    action,
                 ),
             )
             event_id = int(event_cursor.lastrowid)
+            if action in {"exclude_evidence", "restore_evidence"}:
+                connection.execute(
+                    """INSERT INTO attribution_review_evidence_overrides(
+                           message_observation_id, is_excluded, review_event_id, updated_at
+                       ) VALUES (?, ?, ?, ?)
+                       ON CONFLICT(message_observation_id) DO UPDATE SET
+                           is_excluded = excluded.is_excluded,
+                           review_event_id = excluded.review_event_id,
+                           updated_at = excluded.updated_at""",
+                    (message_id, int(action == "exclude_evidence"), event_id, now),
+                )
             _upsert_decision(
                 connection,
                 message_id=message_id,
@@ -734,7 +1052,7 @@ def review_attribution_candidate(
             )
             inserted.append(event_id)
         connection.execute("RELEASE SAVEPOINT attribution_review_records")
-        connection.execute("RELEASE SAVEPOINT attribution_review_action")
+        connection.execute(f"RELEASE SAVEPOINT {operation_savepoint}")
         return inserted
     except Exception:
         connection.execute("ROLLBACK TO SAVEPOINT attribution_review_action")

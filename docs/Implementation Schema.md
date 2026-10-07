@@ -40,6 +40,8 @@ attribution_confidence_candidates
 attribution_confidence_evidence
 attribution_review_events
 attribution_review_decisions
+attribution_review_evidence_overrides
+attribution_review_input_changes
 documents
 document_chunks
 document_entries
@@ -47,7 +49,7 @@ schema_migrations
 ```
 
 This is the migration-backed schema used by both the Discord JSON and document
-importers (version 020). Databases at earlier versions require explicit
+importers (version 021). Databases at earlier versions require explicit
 migrations before they can use boundary persistence, candidate segmentation,
 or identity candidate inference.
 
@@ -76,6 +78,12 @@ provisional identity, or split/reassign/exclude/merge provisional evidence.
 Acceptance and rejection use the existing audited `message_attributions` API;
 identity changes use Phase E's immutable review events and durable evidence
 overrides. F2 run decisions are never rewritten by later inference.
+
+Migration 021 adds prior-state snapshots to F2 review events, reversible
+message-level evidence-exclusion overrides, and an input-change ledger
+populated when character aliases or authoritative player mappings change.
+F1 excludes only messages explicitly suppressed by F2, while retaining the
+underlying source and Phase E evidence.
 
 Scene curation is implemented in migration 015. Scene membership is explicit
 and ordered through `scene_messages`; `scene_channels` is a view of the distinct
@@ -673,10 +681,13 @@ Migration 020 introduces:
 
 F2 acceptance/rejection also uses the existing `message_attributions` and
 `attribution_events` contract. Provisional identity links, splits,
-reassignments, and exclusions use the immutable Phase E identity review log
-and message-level evidence overrides. F1 reads those overrides on subsequent
-runs. Candidate snapshots are not mutated by review actions, and stale F1
-inputs must be recomputed before an action is accepted.
+reassignments, and splits use the immutable Phase E identity review log and
+message-level evidence overrides. F2 exclusions use
+`attribution_review_evidence_overrides`, which can be reversed by a later
+review action without deleting evidence. F1 reads the effective overrides on
+subsequent runs. Candidate snapshots are not mutated by review actions, and
+stale F1 inputs must be recomputed before an action is accepted. F2 audit
+events snapshot the previous F2 decision and current authoritative attribution.
 
 ## Relationship Summary
 

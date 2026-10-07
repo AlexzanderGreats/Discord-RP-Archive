@@ -9,6 +9,7 @@ from pathlib import Path
 from archive.attribution import add_character_alias, create_character
 from archive.attribution_confidence_persistence import run_attribution_confidence
 from archive.attribution_review import (
+    get_attribution_review_candidate,
     list_attribution_review_history,
     list_attribution_review_queue,
     review_attribution_candidate,
@@ -121,10 +122,22 @@ class AttributionReviewWorkflowTests(unittest.TestCase):
         by_message = {row["discord_message_id"]: row for row in queue}
         self.assertIn("hero-one", by_message)
         self.assertIn("plain", by_message)
-        self.assertEqual(by_message["hero-one"]["state"], "queued")
         self.assertEqual(by_message["hero-one"]["candidates"][0]["character_id"], self.hero_id)
         self.assertTrue(by_message["hero-one"]["candidates"][0]["evidence"])
+        self.assertEqual(by_message["hero-one"]["state"], "review_required")
         self.assertEqual(by_message["hero-one"]["review_priority"], "normal")
+        read_model = get_attribution_review_candidate(
+            self.connection, int(by_message["hero-one"]["candidates"][0][
+                "attribution_confidence_candidate_id"
+            ])
+        )
+        self.assertEqual(read_model["affected_message_count"], 2)
+        self.assertEqual(
+            set(read_model["affected_message_ids"]),
+            {self.message_ids["hero-one"], self.message_ids["hero-two"]},
+        )
+        self.assertTrue(read_model["representative_messages"])
+        self.assertEqual(read_model["source"]["confidence_run_id"], self.confidence_run_id)
 
     def test_bulk_confirm_requires_identical_evidence_and_survives_recomputation(self) -> None:
         first_message = self.message_ids["hero-one"]
@@ -165,10 +178,12 @@ class AttributionReviewWorkflowTests(unittest.TestCase):
             self.connection, confidence_run_id=refreshed_run, include_decided=True
         )
         hero_decision = next(row for row in decided if row["discord_message_id"] == "hero-one")
-        self.assertEqual(hero_decision["state"], "accepted")
+        self.assertEqual(hero_decision["state"], "already_resolved")
+        self.assertEqual(hero_decision["authoritative_attributions"][0]["status"], "accepted")
         history = list_attribution_review_history(self.connection, first_message)
         self.assertEqual(history[0]["action"], "confirm")
         self.assertEqual(history[0]["note"], "Reviewed identical speaker labels.")
+        self.assertEqual(json.loads(history[0]["previous_state_json"])["authoritative_attributions"], [])
         with self.assertRaises(sqlite3.IntegrityError):
             self.connection.execute(
                 """UPDATE attribution_review_events SET actor = 'tampered'
@@ -201,6 +216,70 @@ class AttributionReviewWorkflowTests(unittest.TestCase):
             self.connection.execute("SELECT COUNT(*) FROM attribution_review_events").fetchone()[0],
             0,
         )
+
+    def test_alias_change_marks_snapshot_stale_and_conflict_queue_includes_decided(self) -> None:
+        candidate_id = self._candidate("hero-one", "character", self.hero_id)
+        self._review("hero-one", "confirm")
+        # A change in the scoring vocabulary invalidates prior recommendations even before F1 reruns.
+        add_character_alias(self.connection, self.other_id, "Hero")
+        queue = list_attribution_review_queue(
+            self.connection, confidence_run_id=self.confidence_run_id
+        )
+        item = next(row for row in queue if row["discord_message_id"] == "hero-one")
+        self.assertEqual(item["state"], "stale")
+        with self.assertRaisesRegex(ValueError, "stale"):
+            review_attribution_candidate(
+                self.connection,
+                confidence_run_id=self.confidence_run_id,
+                confidence_candidate_id=candidate_id,
+                action="confirm",
+                actor="reviewer",
+            )
+
+    def test_failed_bulk_action_rolls_back_all_authoritative_and_review_changes(self) -> None:
+        candidate_id = self._candidate("hero-one", "character", self.hero_id)
+        second_message = self.message_ids["hero-two"]
+        self.connection.execute(
+            f"""CREATE TRIGGER fail_second_review
+                BEFORE INSERT ON attribution_review_events
+                WHEN NEW.message_observation_id = {int(second_message)}
+                BEGIN SELECT RAISE(ABORT, 'forced review failure'); END"""
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "forced review failure"):
+            review_attribution_candidate(
+                self.connection,
+                confidence_run_id=self.confidence_run_id,
+                confidence_candidate_id=candidate_id,
+                action="confirm",
+                actor="reviewer",
+                message_observation_ids=[
+                    self.message_ids["hero-one"], second_message
+                ],
+            )
+        self.assertEqual(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM message_attributions
+                   WHERE message_observation_id IN (?, ?)""",
+                (self.message_ids["hero-one"], second_message),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.connection.execute("SELECT COUNT(*) FROM attribution_review_events").fetchone()[0],
+            0,
+        )
+
+    def test_previous_acceptance_projection_keeps_original_audit_event(self) -> None:
+        first_event = self._review("hero-one", "confirm")[0]
+        self.confidence_run_id = self._confidence_run()
+        self._review("hero-one", "assign_character", character_id=self.other_id)
+        old_decision = self.connection.execute(
+            """SELECT status, latest_event_id FROM attribution_review_decisions
+               WHERE message_observation_id = ? AND character_id = ?""",
+            (self.message_ids["hero-one"], self.hero_id),
+        ).fetchone()
+        self.assertEqual(old_decision["status"], "superseded")
+        self.assertEqual(old_decision["latest_event_id"], first_event)
 
     def test_reject_candidate_and_conflict_with_existing_acceptance(self) -> None:
         self._review("hero-one", "confirm")
@@ -250,6 +329,22 @@ class AttributionReviewWorkflowTests(unittest.TestCase):
             for item in conflicted["candidates"]
         ))
 
+    def test_new_conflicting_inference_remains_visible_after_prior_confirmation(self) -> None:
+        self._review("hero-one", "confirm")
+        add_character_alias(self.connection, self.other_id, "Hero")
+        self.identity_run_id, _ = run_identity_inference(self.connection, self.messages)
+        self.confidence_run_id = self._confidence_run()
+        queue = list_attribution_review_queue(
+            self.connection, confidence_run_id=self.confidence_run_id
+        )
+        conflicted = next(item for item in queue if item["discord_message_id"] == "hero-one")
+        self.assertEqual(conflicted["state"], "conflicted")
+        self.assertTrue(conflicted["authoritative_attributions"])
+        self.assertIn(
+            "accepted",
+            {item["status"] for item in conflicted["authoritative_attributions"]},
+        )
+
     def test_assign_different_character_supersedes_prior_acceptance(self) -> None:
         self._review("hero-one", "confirm")
         self.confidence_run_id = self._confidence_run()
@@ -273,6 +368,42 @@ class AttributionReviewWorkflowTests(unittest.TestCase):
             "superseded",
         )
         self.assertEqual(len(event_ids), 1)
+
+    def test_message_exception_overrides_bulk_decision(self) -> None:
+        candidate_id = self._candidate("hero-one", "character", self.hero_id)
+        review_attribution_candidate(
+            self.connection,
+            confidence_run_id=self.confidence_run_id,
+            confidence_candidate_id=candidate_id,
+            action="confirm",
+            actor="reviewer",
+            message_observation_ids=[
+                self.message_ids["hero-one"], self.message_ids["hero-two"]
+            ],
+        )
+        self.confidence_run_id = self._confidence_run()
+        exception_candidate = self._candidate("hero-two", "character", self.hero_id)
+        review_attribution_candidate(
+            self.connection,
+            confidence_run_id=self.confidence_run_id,
+            confidence_candidate_id=exception_candidate,
+            action="assign_character",
+            actor="reviewer",
+            character_id=self.other_id,
+        )
+        accepted = self.connection.execute(
+            """SELECT message_observation_id, character_id FROM message_attributions
+               WHERE status = 'accepted' AND message_observation_id IN (?, ?)
+               ORDER BY message_observation_id""",
+            (self.message_ids["hero-one"], self.message_ids["hero-two"]),
+        ).fetchall()
+        self.assertEqual(
+            [tuple(row) for row in accepted],
+            [
+                (self.message_ids["hero-one"], self.hero_id),
+                (self.message_ids["hero-two"], self.other_id),
+            ],
+        )
 
     def test_leave_unresolved_is_durable_and_link_does_not_attribute_message(self) -> None:
         plain_candidate = self._candidate("plain", "unresolved")
@@ -413,6 +544,105 @@ class AttributionReviewWorkflowTests(unittest.TestCase):
             (self.confidence_run_id, self.message_ids["mira-two"]),
         ).fetchone()
         self.assertEqual(excluded["candidate_kind"], "unresolved")
+        self.assertEqual(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM identity_candidate_evidence
+                   WHERE message_observation_id = ?
+                     AND identity_inference_run_id = ?""",
+                (self.message_ids["mira-two"], self.identity_run_id),
+            ).fetchone()[0],
+            1,
+        )
+        excluded_queue = list_attribution_review_queue(
+            self.connection, confidence_run_id=self.confidence_run_id
+        )
+        self.assertEqual(
+            next(item for item in excluded_queue if item["discord_message_id"] == "mira-two")[
+                "state"
+            ],
+            "excluded",
+        )
+        restore_candidate = self._candidate("mira-two", "unresolved")
+        restore_events = review_attribution_candidate(
+            self.connection,
+            confidence_run_id=self.confidence_run_id,
+            confidence_candidate_id=restore_candidate,
+            action="restore_evidence",
+            actor="reviewer",
+            message_observation_ids=[self.message_ids["mira-two"]],
+        )
+        self.assertEqual(len(restore_events), 1)
+        self.identity_run_id, _ = run_identity_inference(self.connection, self.messages)
+        self.confidence_run_id = self._confidence_run()
+        restored = self.connection.execute(
+            """SELECT candidate_kind FROM attribution_confidence_candidates
+               WHERE attribution_confidence_run_id = ? AND message_observation_id = ?
+               ORDER BY candidate_rank LIMIT 1""",
+            (self.confidence_run_id, self.message_ids["mira-two"]),
+        ).fetchone()
+        self.assertEqual(restored["candidate_kind"], "provisional_identity")
+        restore_audit = list_attribution_review_history(
+            self.connection, self.message_ids["mira-two"]
+        )[-1]
+        self.assertEqual(restore_audit["requested_action"], "restore_evidence")
+
+    def test_registered_alias_evidence_can_be_excluded_and_restored(self) -> None:
+        candidate_id = self._candidate("hero-one", "character", self.hero_id)
+        original_evidence_count = self.connection.execute(
+            """SELECT COUNT(*) FROM identity_candidate_evidence
+               WHERE message_observation_id = ?""",
+            (self.message_ids["hero-one"],),
+        ).fetchone()[0]
+        review_attribution_candidate(
+            self.connection,
+            confidence_run_id=self.confidence_run_id,
+            confidence_candidate_id=candidate_id,
+            action="exclude_evidence",
+            actor="reviewer",
+            message_observation_ids=[self.message_ids["hero-one"]],
+        )
+        excluded = self.connection.execute(
+            """SELECT is_excluded FROM attribution_review_evidence_overrides
+               WHERE message_observation_id = ?""",
+            (self.message_ids["hero-one"],),
+        ).fetchone()[0]
+        self.assertEqual(excluded, 1)
+        self.assertEqual(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM identity_candidate_evidence
+                   WHERE message_observation_id = ?""",
+                (self.message_ids["hero-one"],),
+            ).fetchone()[0],
+            original_evidence_count,
+        )
+        self.confidence_run_id = self._confidence_run()
+        unresolved_candidate = self._candidate("hero-one", "unresolved")
+        review_attribution_candidate(
+            self.connection,
+            confidence_run_id=self.confidence_run_id,
+            confidence_candidate_id=unresolved_candidate,
+            action="restore_evidence",
+            actor="reviewer",
+            message_observation_ids=[self.message_ids["hero-one"]],
+        )
+        self.confidence_run_id = self._confidence_run()
+        self.assertEqual(
+            self.connection.execute(
+                """SELECT is_excluded FROM attribution_review_evidence_overrides
+                   WHERE message_observation_id = ?""",
+                (self.message_ids["hero-one"],),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                """SELECT candidate_kind FROM attribution_confidence_candidates
+                   WHERE attribution_confidence_run_id = ? AND message_observation_id = ?
+                   ORDER BY candidate_rank LIMIT 1""",
+                (self.confidence_run_id, self.message_ids["hero-one"]),
+            ).fetchone()[0],
+            "character",
+        )
 
     def test_merge_moves_all_active_evidence_to_target_identity(self) -> None:
         source_candidate_id = self._provisional_id("mira-one")
