@@ -70,12 +70,12 @@ class MigrationTests(unittest.TestCase):
         self.connection.close()
 
     def test_migrations_preserve_legacy_rows_and_are_repeatable(self) -> None:
-        self.assertEqual(run_migrations(self.connection), 19)
+        self.assertEqual(run_migrations(self.connection), 20)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM document_chunks").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM legacy_document_entries").fetchone()[0], 1)
-        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 19)
+        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 20)
         tables = {
             row[0]
             for row in self.connection.execute(
@@ -100,6 +100,7 @@ class MigrationTests(unittest.TestCase):
                 "identity_candidate_evidence_overrides",
                 "attribution_confidence_runs", "attribution_confidence_candidates",
                 "attribution_confidence_evidence",
+                "attribution_review_events", "attribution_review_decisions",
             },
         )
         message_columns = {
@@ -111,7 +112,7 @@ class MigrationTests(unittest.TestCase):
             "SELECT document_id, entry_index, content_text FROM document_entries"
         ).fetchone()
         self.assertEqual(tuple(migrated_entry), (7, 0, ""))
-        self.assertEqual(run_migrations(self.connection), 19)
+        self.assertEqual(run_migrations(self.connection), 20)
 
     def test_changed_applied_migration_is_rejected(self) -> None:
         run_migrations(self.connection)
@@ -129,10 +130,13 @@ class MigrationTests(unittest.TestCase):
             ("25439f9cbd3bb2e571d275b8a7121a2e47e998d1b4abb1a61e93723eaf3b3aa5",),
         )
 
-        self.assertEqual(run_migrations(self.connection), 19)
+        self.assertEqual(run_migrations(self.connection), 20)
 
     def test_candidate_migrations_upgrade_a_version_15_database(self) -> None:
         run_migrations(self.connection)
+        self.connection.execute("DROP TABLE attribution_review_decisions")
+        self.connection.execute("DROP TABLE attribution_review_events")
+        self.connection.execute("DELETE FROM schema_migrations WHERE version = 20")
         self.connection.execute("DROP TABLE attribution_confidence_evidence")
         self.connection.execute("DROP TABLE attribution_confidence_candidates")
         self.connection.execute("DROP TABLE attribution_confidence_runs")
@@ -155,7 +159,7 @@ class MigrationTests(unittest.TestCase):
         self.connection.execute("DELETE FROM schema_migrations WHERE version = 16")
         self.connection.commit()
 
-        self.assertEqual(run_migrations(self.connection), 19)
+        self.assertEqual(run_migrations(self.connection), 20)
         self.assertIsNotNone(
             self.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'candidate_spans'"
@@ -175,19 +179,28 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(self.connection.execute("PRAGMA foreign_key_check").fetchall(), [])
 
-    def test_attribution_confidence_migration_upgrades_version_18(self) -> None:
+    def test_review_migrations_upgrade_a_version_18_database(self) -> None:
         run_migrations(self.connection)
+        self.connection.execute("DROP TABLE attribution_review_decisions")
+        self.connection.execute("DROP TABLE attribution_review_events")
+        self.connection.execute("DELETE FROM schema_migrations WHERE version = 20")
         self.connection.execute("DROP TABLE attribution_confidence_evidence")
         self.connection.execute("DROP TABLE attribution_confidence_candidates")
         self.connection.execute("DROP TABLE attribution_confidence_runs")
         self.connection.execute("DELETE FROM schema_migrations WHERE version = 19")
         self.connection.commit()
 
-        self.assertEqual(run_migrations(self.connection), 19)
+        self.assertEqual(run_migrations(self.connection), 20)
         self.assertIsNotNone(
             self.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
                 "AND name = 'attribution_confidence_runs'"
+            ).fetchone()
+        )
+        self.assertIsNotNone(
+            self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'attribution_review_events'"
             ).fetchone()
         )
         self.assertEqual(self.connection.execute("PRAGMA foreign_key_check").fetchall(), [])

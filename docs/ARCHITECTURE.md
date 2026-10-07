@@ -297,6 +297,34 @@ claims or audit events, Discord-player identity links, or player-character
 mappings. The archive therefore supplies no reviewed examples to calibrate
 character confidence scores.
 
+## Attribution Review Workflow (Implemented)
+
+`archive/attribution_review.py` supplies a GUI-neutral read model and action
+API over completed Phase F1 snapshots. The review queue prioritizes
+high/normal/low work, includes current candidates and their evidence, and marks
+snapshots stale if a newer inference/confidence result or relevant human
+review has changed the inputs. Actions against stale snapshots are rejected so
+reviewers must refresh first.
+
+Confirm and assign-character actions create or accept an audited manual
+attribution. Reject records a rejected manual claim; if that character is
+already accepted, F2 records a conflict without silently revoking it.
+Leave-unresolved is an explicit durable review state. Linking a provisional
+identity updates only the identity mapping and does not create a message
+attribution. Split, reassign, exclude, and merge operations reuse Phase E's
+immutable identity-review events and persistent per-message evidence
+overrides.
+
+F2 records each action in append-only `attribution_review_events`, with
+reviewer, timestamp, optional note, source F1 candidate/evidence fingerprint,
+and linked authoritative attribution or identity-review event. The mutable
+`attribution_review_decisions` table is a current-state projection; it does
+not replace audit history. Bulk attribution review is allowed only when every
+selected message has the same candidate and matching evidence fingerprint.
+Each message still receives its own audit event. F1 recomputation does not
+update F2 decisions; newly produced snapshots remain separate and expose the
+preserved human decision state.
+
 ## Pipeline Overview
 
 The implemented flow can be represented as:

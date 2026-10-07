@@ -38,6 +38,8 @@ identity_candidate_evidence_overrides
 attribution_confidence_runs
 attribution_confidence_candidates
 attribution_confidence_evidence
+attribution_review_events
+attribution_review_decisions
 documents
 document_chunks
 document_entries
@@ -45,7 +47,7 @@ schema_migrations
 ```
 
 This is the migration-backed schema used by both the Discord JSON and document
-importers (version 019). Databases at earlier versions require explicit
+importers (version 020). Databases at earlier versions require explicit
 migrations before they can use boundary persistence, candidate segmentation,
 or identity candidate inference.
 
@@ -66,6 +68,14 @@ Migration 019 adds versioned attribution-confidence runs, ranked per-message
 candidate snapshots, and evidence contributions. It reads Phase E evidence and
 existing attribution decisions but does not change either source or write
 authoritative attribution.
+
+Migration 020 adds immutable F2 attribution-review events and a replaceable
+current-decision projection. Review actions can accept or reject a character
+candidate, assign another character, leave a message unresolved, link a
+provisional identity, or split/reassign/exclude/merge provisional evidence.
+Acceptance and rejection use the existing audited `message_attributions` API;
+identity changes use Phase E's immutable review events and durable evidence
+overrides. F2 run decisions are never rewritten by later inference.
 
 Scene curation is implemented in migration 015. Scene membership is explicit
 and ordered through `scene_messages`; `scene_channels` is a view of the distinct
@@ -647,6 +657,26 @@ boundary scores do not contribute to character scores.
 The authoritative review decision remains in `message_attributions` with its
 append-only `attribution_events`. Confidence runs snapshot that state and
 cannot supersede or update it.
+
+## Attribution review tables
+
+Migration 020 introduces:
+
+- `attribution_review_events`: immutable F2 review events with grouped action
+  identity, message and F1 source, reviewer, timestamp, optional note, outcome,
+  evidence fingerprint, and links to the authoritative attribution or Phase E
+  review event.
+- `attribution_review_decisions`: current per-message/per-candidate outcome.
+  It is a replaceable read projection, not the audit record. Accepted character
+  outcomes are constrained to one per message; prior F2 accepted outcomes are
+  marked superseded when a different character is accepted.
+
+F2 acceptance/rejection also uses the existing `message_attributions` and
+`attribution_events` contract. Provisional identity links, splits,
+reassignments, and exclusions use the immutable Phase E identity review log
+and message-level evidence overrides. F1 reads those overrides on subsequent
+runs. Candidate snapshots are not mutated by review actions, and stale F1
+inputs must be recomputed before an action is accepted.
 
 ## Relationship Summary
 
