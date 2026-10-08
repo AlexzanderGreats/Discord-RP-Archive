@@ -274,6 +274,53 @@ class CandidateSegmentationPersistenceTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertTrue(all(item["channel_id"] == row["channel_id"] for item in result))
 
+    def test_loader_can_select_a_superseded_import_and_message_subset(self) -> None:
+        original_import_id = int(self.connection.execute(
+            "SELECT import_id FROM imports ORDER BY import_id LIMIT 1"
+        ).fetchone()[0])
+        original_message_ids = [
+            int(row[0])
+            for row in self.connection.execute(
+                "SELECT message_observation_id FROM messages WHERE import_id = ? "
+                "ORDER BY message_observation_id",
+                (original_import_id,),
+            )
+        ]
+        replacement = json.loads(self.export_path.read_text(encoding="utf-8"))
+        replacement["messages"].append({
+            "id": "three",
+            "timestamp": "2026-01-01T00:02:00Z",
+            "author": {"id": "player", "name": "Player"},
+            "content": "Replacement capture",
+        })
+        self.export_path.write_text(json.dumps(replacement), encoding="utf-8")
+        import_file(self.connection, self.export_path)
+
+        current = load_current_message_observations(self.connection)
+        historical = load_current_message_observations(
+            self.connection,
+            import_id=original_import_id,
+        )
+        subset = load_current_message_observations(
+            self.connection,
+            import_id=original_import_id,
+            message_observation_ids=[original_message_ids[0]],
+        )
+
+        self.assertEqual(len(current), 3)
+        self.assertEqual(
+            [int(row["message_observation_id"]) for row in historical],
+            original_message_ids,
+        )
+        self.assertEqual(
+            [int(row["message_observation_id"]) for row in subset],
+            [original_message_ids[0]],
+        )
+        self.assertEqual(load_current_message_observations(
+            self.connection,
+            message_observation_ids=[],
+        ), [])
+
     def test_cross_channel_reply_is_persisted_as_a_link_without_merging_spans(self) -> None:
         other_path = Path(self.temp_dir.name) / "other-channel.json"
         other_path.write_text(json.dumps({

@@ -361,9 +361,45 @@ audit event. Phase boundaries remain: F1 confidence/read model, F2 durable
 review and audit, F3 presentation, and Phase G orchestration/incremental
 processing/reporting.
 
+## Inference Pipeline Orchestration (Phase G)
+
+`archive/pipeline.py` coordinates only the existing B, C, D, E, and F1
+services. It records each request and its completed stage references in the
+`pipeline_runs` manifest; stage outputs remain in their existing persistence
+tables. It does not create or alter curated scenes, scene memberships,
+participants, arcs, F2 decisions, or review audit events. F2 is read only to
+report review-queue state and whether confidence results have become stale.
+
+The CLI supports `pipeline run`, `pipeline dry-run`, `pipeline status`, and
+`pipeline report`. A run accepts explicit import, message-observation,
+server, and channel scope filters. With no filters, the observation loader
+selects the current accepted imports. An explicit import can select a prior
+accepted capture; it does not silently widen to other imports. Empty selected
+scopes are rejected. Dry-run writes a durable G manifest but does not persist
+inference stages; exact cached stages may be reported as reusable, and
+uncached F1 work is reported as planned rather than calculated.
+
+Stage fingerprints cover immutable selected message observations, effective
+source/import metadata, extracted signals, and the relevant rules/configuration.
+Incremental mode reuses each stage independently when its exact inputs match,
+so alias-map changes invalidate E/F1 without requiring a new C/D result. Full
+mode recomputes all stages if any stage input or the current confidence review
+state differs; an identical completed full run remains a safe no-op reuse.
+Reports include scope/input fingerprints, stage IDs/statuses, counts/deltas,
+warnings, and F2 staleness, but do not treat operational scores as
+probabilities or decisions.
+
+The manifest is committed before stage work and progress is recorded between
+stages, so a failed request is visible and does not masquerade as a completed
+run. A failed request can leave already-persisted inference stages, and there
+is no cross-stage transaction that rolls them back. Validate against a
+controlled copy or explicitly selected scope. The orchestrator also does not
+resolve overlapping interactions or cross-channel scene continuity; existing
+D spans remain provisional and non-overlapping.
+
 ## Pipeline Overview
 
-The implemented flow can be represented as:
+The archive import flow remains distinct from the B–F1 analysis pipeline:
 
 ```text
 RAW FILE
@@ -385,6 +421,26 @@ DATABASE
    |
    v
 FTS INDEX
+
+ACCEPTED MESSAGE OBSERVATIONS
+   |
+   v
+B SIGNAL EXTRACTION
+   |
+   v
+C BOUNDARY EVIDENCE
+   |
+   v
+D PROVISIONAL SPANS
+   |
+   v
+E IDENTITY CANDIDATES
+   |
+   v
+F1 ATTRIBUTION CONFIDENCE
+   |
+   v
+F2 HUMAN REVIEW  -->  F3 REVIEW GUI
 ```
 
 The Discord importer registers the byte-distinct capture, validates the export,

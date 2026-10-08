@@ -15,7 +15,7 @@ from archive.boundaries import (
     fingerprint_analysis_inputs,
     summarize_candidates,
 )
-from archive.signals import MessageRecord
+from archive.signals import MessageRecord, Signal
 
 
 def _now() -> str:
@@ -29,6 +29,7 @@ def run_boundary_detection(
     input_scope: Mapping[str, Any],
     config: BoundaryScoringConfig = DEFAULT_CONFIG,
     run_type: str = "full",
+    precomputed_analysis: tuple[Sequence[Signal], Sequence[BoundaryCandidate]] | None = None,
 ) -> tuple[int, list[BoundaryCandidate]]:
     """Persist one reproducible boundary run and its non-none candidates.
 
@@ -60,7 +61,11 @@ def run_boundary_detection(
 
     connection.execute("SAVEPOINT boundary_detection_results")
     try:
-        signals, candidates = analyze_message_boundaries(messages, config=config)
+        if precomputed_analysis is None:
+            signals, candidates = analyze_message_boundaries(messages, config=config)
+        else:
+            signals, candidates = precomputed_analysis
+            candidates = list(candidates)
         fingerprint = fingerprint_analysis_inputs(messages, signals)
         completed_at = _now()
         for position, record in enumerate(messages):

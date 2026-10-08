@@ -26,44 +26,81 @@ def load_current_message_observations(
     server_id: int | None = None,
     channel_id: int | None = None,
     source_id: int | None = None,
+    import_id: int | None = None,
+    message_observation_ids: Sequence[int] | None = None,
 ) -> list[sqlite3.Row]:
-    """Load one latest accepted import from each current accepted source capture."""
+    """Load accepted observations in an explicit archive scope.
+
+    Without ``import_id``, only the latest accepted import for each current
+    source capture is included. An explicit import selects that accepted import
+    even if a newer capture supersedes it.
+    """
     filters: list[str] = []
     parameters: list[int] = []
     for field, value in (
         ("c.server_id", server_id),
         ("m.channel_id", channel_id),
         ("m.source_id", source_id),
+        ("m.import_id", import_id),
     ):
         if value is not None:
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{field.rsplit('.', 1)[-1]} must be a positive integer")
-            filters.append(f"{field} = ?")
-            parameters.append(value)
-    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
-    query = f"""WITH current_sources AS (
-                    SELECT DISTINCT s.source_id
-                    FROM sources s
-                    JOIN imports accepted ON accepted.source_id = s.source_id
-                    WHERE accepted.accepted_at IS NOT NULL
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM sources newer
-                          JOIN imports newer_import ON newer_import.source_id = newer.source_id
-                          WHERE newer.supersedes_source_id = s.source_id
-                            AND newer_import.accepted_at IS NOT NULL
-                      )
-                ),
-                latest_imports AS (
-                    SELECT i.import_id, i.source_id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY i.source_id
-                               ORDER BY i.accepted_at DESC, i.import_id DESC
-                           ) AS import_rank
-                    FROM imports i
-                    JOIN current_sources current ON current.source_id = i.source_id
-                    WHERE i.accepted_at IS NOT NULL
-                )
+            if field != "m.import_id":
+                filters.append(f"{field} = ?")
+                parameters.append(value)
+
+    selected_ids: tuple[int, ...] | None = None
+    if message_observation_ids is not None:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in message_observation_ids
+        ):
+            raise ValueError("message_observation_ids must contain positive integers")
+        selected_ids = tuple(sorted(set(message_observation_ids)))
+        if not selected_ids:
+            return []
+
+    if import_id is None:
+        imports_cte = """current_sources AS (
+                             SELECT DISTINCT s.source_id
+                             FROM sources s
+                             JOIN imports accepted ON accepted.source_id = s.source_id
+                             WHERE accepted.accepted_at IS NOT NULL
+                               AND NOT EXISTS (
+                                   SELECT 1
+                                   FROM sources newer
+                                   JOIN imports newer_import
+                                     ON newer_import.source_id = newer.source_id
+                                   WHERE newer.supersedes_source_id = s.source_id
+                                     AND newer_import.accepted_at IS NOT NULL
+                               )
+                         ),
+                         latest_imports AS (
+                             SELECT i.import_id, i.source_id,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY i.source_id
+                                        ORDER BY i.accepted_at DESC, i.import_id DESC
+                                    ) AS import_rank
+                             FROM imports i
+                             JOIN current_sources current ON current.source_id = i.source_id
+                             WHERE i.accepted_at IS NOT NULL
+                         )"""
+        cte_parameters: list[int] = []
+    else:
+        imports_cte = """current_sources AS (
+                             SELECT DISTINCT source_id
+                             FROM imports
+                             WHERE import_id = ? AND accepted_at IS NOT NULL
+                         ),
+                         latest_imports AS (
+                             SELECT import_id, source_id, 1 AS import_rank
+                             FROM imports
+                             WHERE import_id = ? AND accepted_at IS NOT NULL
+                         )"""
+        cte_parameters = [import_id, import_id]
+
+    query_template = f"""WITH {imports_cte}
                 SELECT m.message_observation_id, m.discord_message_id,
                        m.timestamp_unix, m.timestamp_utc, m.channel_id,
                        c.server_id, m.source_id, m.import_id,
@@ -74,11 +111,39 @@ def load_current_message_observations(
                 JOIN latest_imports latest
                   ON latest.import_id = m.import_id AND latest.import_rank = 1
                 LEFT JOIN channels c ON c.channel_id = m.channel_id
-                {where_clause}
+                {{where_clause}}
                 ORDER BY c.server_id, m.channel_id, m.source_id,
                          m.timestamp_unix IS NULL, m.timestamp_unix,
                          m.message_observation_id"""
-    return connection.execute(query, parameters).fetchall()
+    batches = (
+        [selected_ids[start : start + 500] for start in range(0, len(selected_ids), 500)]
+        if selected_ids is not None
+        else [()]
+    )
+    rows: list[sqlite3.Row] = []
+    for batch in batches:
+        batch_filters = list(filters)
+        batch_parameters = list(parameters)
+        if selected_ids is not None:
+            placeholders = ",".join("?" for _ in batch)
+            batch_filters.append(f"m.message_observation_id IN ({placeholders})")
+            batch_parameters.extend(batch)
+        query = query_template.format(
+            where_clause=f"WHERE {' AND '.join(batch_filters)}" if batch_filters else ""
+        )
+        rows.extend(connection.execute(
+            query,
+            [*cte_parameters, *batch_parameters],
+        ).fetchall())
+    rows.sort(key=lambda row: (
+        row["server_id"] if row["server_id"] is not None else -1,
+        row["channel_id"] if row["channel_id"] is not None else -1,
+        row["source_id"] if row["source_id"] is not None else -1,
+        row["timestamp_unix"] is None,
+        row["timestamp_unix"] if row["timestamp_unix"] is not None else 0,
+        row["message_observation_id"],
+    ))
+    return rows
 
 
 def _input_fingerprint(
