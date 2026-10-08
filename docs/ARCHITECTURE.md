@@ -331,6 +331,36 @@ Each message still receives its own audit event. F1 recomputation does not
 update F2 decisions; newly produced snapshots remain separate and expose the
 preserved human decision state.
 
+## Attribution Review GUI (Implemented — Phase F3)
+
+`archive/gui.py` integrates an Attribution Review tab into the existing
+Tkinter/`ttk.Notebook` application. The view and GUI-neutral service adapter
+live in `archive/attribution_review_gui.py`; queue, candidate, paged evidence,
+registered-character, and review-action data flow through the F2 API in
+`archive/attribution_review.py`. The view uses the existing `ReaderService`
+only for read-only surrounding channel context, which it labels as context
+rather than attribution evidence.
+
+The queue uses bounded pages and F2 filters for priority, state, confidence
+classification, identity kind, stale status, label, server, and channel. The
+candidate view displays operational scores as evidence scores (not
+probabilities), alternatives, original message content and provenance, evidence
+direction/source, channel context, authoritative F2 attributions, and immutable
+review history. Confirmation, assignment, provisional linking, unresolved
+decisions, rejection, evidence exclusion/restoration, split, reassign, and merge
+are sent to F2; the interface does not write attribution, audit, or scene tables.
+Consequence-bearing actions require confirmation, and action calls include the
+displayed latest review-event version. Successful actions reload F2 state;
+stale or rejected actions are surfaced and do not appear successful.
+
+No migration or GUI-only persistence was added. F3 does not create characters
+or players, infer player links, or modify curated scenes or memberships. Bulk
+actions are available only for selected messages returned by F2 as having the
+same candidate evidence; F2 still validates the action and writes a per-message
+audit event. Phase boundaries remain: F1 confidence/read model, F2 durable
+review and audit, F3 presentation, and Phase G orchestration/incremental
+processing/reporting.
+
 ## Pipeline Overview
 
 The implemented flow can be represented as:

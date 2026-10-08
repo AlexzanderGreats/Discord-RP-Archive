@@ -4,17 +4,22 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 
 from archive.attribution import add_character_alias, create_character
+from archive.attribution_review_gui import AttributionReviewService
 from archive.attribution_confidence_persistence import run_attribution_confidence
 from archive.attribution_review import (
     get_attribution_review_candidate,
+    list_attribution_review_candidate_messages,
+    list_attribution_review_characters,
     list_attribution_review_history,
     list_attribution_review_queue,
     review_attribution_candidate,
 )
 from archive.identity_candidate_persistence import run_identity_inference
+from archive.scenes import add_message_to_scene, create_scene
 from src.build_archive import create_database, import_file
 
 
@@ -138,6 +143,99 @@ class AttributionReviewWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(read_model["representative_messages"])
         self.assertEqual(read_model["source"]["confidence_run_id"], self.confidence_run_id)
+        self.assertIn("evidence", read_model["alternatives"][0])
+        self.assertIn("review_status", read_model["alternatives"][0])
+
+    def test_review_read_models_support_bounded_filtered_pages(self) -> None:
+        first_page = list_attribution_review_queue(
+            self.connection,
+            confidence_run_id=self.confidence_run_id,
+            include_decided=True,
+            limit=1,
+            include_evidence=False,
+            include_message_content=False,
+            candidate_kinds=("character",),
+            label_query="hero",
+        )
+        second_page = list_attribution_review_queue(
+            self.connection,
+            confidence_run_id=self.confidence_run_id,
+            include_decided=True,
+            limit=1,
+            offset=1,
+            include_evidence=False,
+            include_message_content=False,
+            candidate_kinds=("character",),
+            label_query="hero",
+        )
+        self.assertEqual(len(first_page), 1)
+        self.assertEqual(len(second_page), 1)
+        self.assertNotEqual(
+            first_page[0]["message_observation_id"],
+            second_page[0]["message_observation_id"],
+        )
+        self.assertNotIn("content_original", first_page[0])
+        self.assertNotIn("evidence", first_page[0]["candidates"][0])
+        self.assertGreater(first_page[0]["candidates"][0]["evidence_count"], 0)
+
+        character_id = self._candidate("hero-one", "character", self.hero_id)
+        message_page = list_attribution_review_candidate_messages(
+            self.connection, character_id, offset=0, limit=1
+        )
+        self.assertEqual(message_page["total"], 2)
+        self.assertEqual(len(message_page["messages"]), 1)
+        evidence_message = message_page["messages"][0]
+        self.assertIn("content_original", evidence_message)
+        self.assertIn("author_discord_user_id_original", evidence_message)
+        self.assertIn("source_path", evidence_message)
+        self.assertTrue(evidence_message["evidence"])
+        self.assertEqual(
+            len(list_attribution_review_characters(self.connection)),
+            2,
+        )
+
+    def test_gui_service_reviews_through_f2_without_changing_curated_scenes(self) -> None:
+        scene_id = create_scene(self.connection, "Curated scene stays unchanged")
+        add_message_to_scene(
+            self.connection,
+            scene_id,
+            self.message_ids["hero-one"],
+            added_by="curator",
+        )
+
+        def curated_snapshot() -> tuple[tuple[tuple[object, ...], ...], ...]:
+            tables = ("arcs", "scenes", "scene_messages", "scene_participants")
+            return tuple(
+                tuple(tuple(row) for row in self.connection.execute(f"SELECT * FROM {table}"))
+                for table in tables
+            )
+
+        scene_before = curated_snapshot()
+        candidate_id = self._candidate("hero-one", "character", self.hero_id)
+        service = AttributionReviewService(lambda: nullcontext(self.connection))
+
+        result = service.perform_action(
+            confidence_run_id=self.confidence_run_id,
+            confidence_candidate_id=candidate_id,
+            action="confirm",
+            actor="reviewer",
+            note="Verified from source message",
+            character_id=self.hero_id,
+            target_candidate_id=None,
+            message_ids=[self.message_ids["hero-one"]],
+            expected_latest_event_id=0,
+            queue_offset=0,
+            filters={},
+        )
+
+        self.assertEqual(len(result["event_ids"]), 1)
+        self.assertEqual(curated_snapshot(), scene_before)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM attribution_review_events"
+            ).fetchone()[0],
+            1,
+        )
 
     def test_bulk_confirm_requires_identical_evidence_and_survives_recomputation(self) -> None:
         first_message = self.message_ids["hero-one"]

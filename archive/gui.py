@@ -6,16 +6,18 @@ import sqlite3
 import subprocess
 import sys
 import tkinter as tk
+from contextlib import contextmanager
 from queue import Empty, Queue
 from pathlib import Path
 from threading import Thread
 from tkinter import filedialog, messagebox, ttk
-from typing import Any
+from typing import Any, Generator
 
 from archive.reader_service import ReaderService
 from archive.ollama_service import ArchiveAnswerService, OllamaClient, OllamaRequestDetails
 from archive.search_service import SearchService
 from archive.sync_service import StartupSyncReport, synchronize_archive
+from archive.attribution_review_gui import AttributionReviewService, AttributionReviewTab
 
 
 THEME_PALETTES = {
@@ -154,8 +156,30 @@ class ArchiveApp:
         self._build_search()
         self._build_reader()
         self._build_ask()
+        self._build_attribution_review()
         self._apply_theme()
         self._poll_system_theme()
+
+    @contextmanager
+    def _attribution_review_connection(self) -> Generator[sqlite3.Connection, None, None]:
+        connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield connection
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _build_attribution_review(self) -> None:
+        self.attribution_review = AttributionReviewTab(
+            self.pages,
+            self.root,
+            AttributionReviewService(self._attribution_review_connection),
+            self._run_background,
+        )
 
     def _load_theme_preference(self) -> str:
         try:
