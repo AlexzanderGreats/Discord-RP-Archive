@@ -1,8 +1,10 @@
-# Database Migration Documentation
+# Discord RP Archive Documentation
 
-This document records the migration system implemented for the archive and
-the migration of the existing `02_Processed/archive.sqlite3` database. The
-target schema is specified in [Implementation Schema.md](Implementation%20Schema.md).
+This document records the archive's implemented data model, import and analysis
+workflows, review boundaries, migrations, and operational limitations. Historical
+live-database measurements are explicitly dated/contextual and should not be
+read as the result of later inference pipeline runs. The target schema is
+specified in [Implementation Schema.md](Implementation%20Schema.md).
 
 ## Purpose
 
@@ -111,6 +113,229 @@ for message in list_scene_messages(connection, scene_id):
 connection.commit()
 connection.close()
 ```
+
+## Inference, Attribution Review, and Pipeline Orchestration (Phases B–G)
+
+The analysis workflow is deliberately separate from curated scene data and is
+implemented as distinct, ordered responsibilities:
+
+```text
+B: signal extraction
+   -> C: boundary evidence and scoring
+   -> D: provisional temporal spans
+   -> E: identity candidate inference
+   -> F1: attribution confidence
+   -> F2: human review actions and durable audit
+   -> F3: review GUI
+   -> G: orchestration and reporting for B–F1
+```
+
+This sequence does not collapse the concepts into one detector. Segmentation
+provides evidence about where a potential scene may begin or end; reconstruction
+decides which messages belong to which candidate scenes; attribution evidence
+concerns represented characters and players; and confidence/review distinguish
+automatically triageable results from conclusions that require a person.
+Phase G runs only through F1. It does not apply F2 review actions, create
+curated scenes, or claim to solve later reconstruction.
+
+### B — Deterministic signal extraction
+
+`archive/signals.py` operates on normalized message-observation records and is
+independent of persistence, scene curation, and GUI behavior. A signal includes
+its type, source message-observation IDs, observed value, evidence, and an
+explicit-versus-heuristic evidence kind. Extraction reports evidence; it does
+not score scene boundaries or calculate attribution confidence.
+
+Implemented signals include timestamp gaps and timestamp availability or
+validity, channel changes, raw-author changes, reply relationships, source and
+import changes, exact recognized scene-control marker lines, leading bracketed
+speaker labels, leading OOC markers, labeled `Location:`, `Setting:`, and
+`Time:` context lines, and thread-related changes only where thread metadata is
+actually present in the preserved source payload. Contradictory evidence is
+retained. Speaker labels are observations, not proof of registered character
+identity or player identity.
+
+The normalized `messages` schema has no `thread_id` column, and
+`thread_name` is not persisted as a normalized field. Thread metadata must
+therefore be read from preserved `source_json` when the supported key is
+present; it must never be assumed for every message. Signals cannot currently
+establish natural-language scene transitions, full character participation,
+arbitrary references not represented by the normalized reply field, or reply
+targets missing from the supplied observations.
+
+### C — Boundary evidence and scoring
+
+`archive/boundaries.py` scores adjacent-message transitions after the caller
+has selected and ordered the input. It neither sorts global messages nor
+creates scene membership. Its versioned configuration and results preserve
+each contribution, source observations, supporting and contradictory evidence,
+raw score, and classification.
+
+The current ruleset is `event_boundaries_v1`. Recognized hard scene markers
+and a source-capture change create hard boundary candidates; an import-run
+change alone does not. Soft evidence includes timestamp gaps, channel changes,
+narrative-context changes, author and speaker-label changes, and thread changes
+when available. A direct reply is continuity evidence and can contradict a
+boundary. Timestamp gaps are normalized against the configured reference.
+Weights and thresholds are initial operational values, not empirically
+calibrated probabilities. `strong_candidate` means there is evidence at the
+transition edge; it is not proof that the messages on either side belong to
+different scenes.
+
+Migration 016 stores boundary-detection runs, the ordered observations
+examined, and non-`none` boundary candidates. These records are inference
+outputs, separate from curated `scenes` and `scene_messages`.
+
+### D — Provisional spans, not curated scenes
+
+`archive/segmentation.py` and `archive/segmentation_persistence.py` create
+deterministic candidate spans from scoped, ordered observations and C's
+boundary evidence. The current scope is server, channel, and source capture.
+Hard boundaries and configured inactivity gaps can split spans; a soft
+boundary score alone does not. A direct in-scope reply can bridge an inactivity
+gap. Reply links retain resolved, unresolved, ambiguous, and cross-scope
+outcomes.
+
+Migration 017 stores segmentation runs, candidate spans, candidate memberships,
+reply links, and the boundary decisions used for the partition. These are
+provisional inference records only. The first implementation is a non-overlap
+partition per scope, not an assumption that all future reconstruction must be
+linear: it does not separate simultaneous interactions in one channel or
+reconstruct a scene that moves between channels. It does not create or update
+`scenes` or `scene_messages`.
+
+### E — Identity evidence and provisional candidates
+
+`archive/identity_inference.py` and
+`archive/identity_candidate_persistence.py` interpret supported header speaker
+labels independently of segmentation. Exact normalized registered-alias
+matches remain registered-character evidence; multiple matches remain
+ambiguous; unmatched labels form stable provisional candidates within a known
+server. When server scope is missing, observations are not merged across
+unknown contexts. Discord author identity is contextual evidence only.
+
+Migration 018 stores versioned inference runs, provisional candidates,
+per-message evidence, and identity-review history/overrides. This phase does
+not create characters or players, infer players, attribute messages, or make
+candidate identities depend on D spans.
+
+### F1 — Confidence snapshots
+
+`archive/attribution_confidence.py` and
+`archive/attribution_confidence_persistence.py` aggregate E evidence into
+per-message candidate and alternative snapshots. Scores are evidence units,
+not probabilities. High-confidence is a review-priority classification, never
+automatic acceptance. Ambiguity, unresolved evidence, conflicts, and linked
+provisional identities remain subject to human review. Existing authoritative
+attributions and their audit events remain authoritative.
+
+Migration 019 stores confidence runs, candidates, and evidence contributions.
+F1 recomputation creates a new inference snapshot; it does not edit F2 decisions
+or the curated scene tables.
+
+### F2 — Durable human review API
+
+`archive/attribution_review.py` provides a GUI-neutral review queue, read model,
+and action API. Queue results expose priorities, evidence, current authoritative
+attributions, review state, and stale status. Supported human operations
+include confirming or rejecting an attribution, assigning a different
+registered character, leaving evidence unresolved, linking a provisional
+identity to a registered character, splitting/reassigning/merging provisional
+evidence, excluding/restoring evidence, and attaching human notes.
+
+Migration 020 adds review state, evidence overrides, input-change tracking,
+and immutable review events; migration 021 hardens F2 review semantics. Every
+human action has durable audit history containing the actor, time, note,
+relevant source candidate/evidence, prior-state details, and linked review or
+attribution event where applicable. The current decision table is a projection
+of that history, not a replacement for it. Rejections do not silently revoke a
+different already-accepted attribution; conflicts remain visible. Exclusions
+are explicit and reversible; original message observations are not altered.
+
+Bulk review is allowed only where selected messages have the same candidate
+and matching evidence. Each message still receives its own review event.
+Per-message overrides are retained. New inference does not overwrite manual
+decisions; stale snapshots are surfaced and stale actions are rejected, so a
+reviewer must act on a current snapshot rather than accidentally accepting old
+recommendations.
+
+### F3 — Review GUI
+
+`archive/gui.py` includes an Attribution Review tab. GUI-specific
+presentation/service adaptation lives in `archive/attribution_review_gui.py`;
+review queue, candidate evidence, history, and actions continue to use the F2
+API. The UI provides bounded queue/evidence pages, queue filters, candidate
+details, surrounding channel context labeled as context, review history,
+confirmation for consequential actions, and stale-action feedback. It does not
+write attribution/audit tables directly and does not edit curated scenes or
+memberships.
+
+### G — Orchestration, cache reuse, and reporting
+
+`archive/pipeline.py` coordinates the existing B, C, D, E, and F1 services.
+Migration 022 adds the `pipeline_runs` manifest. A manifest records request
+scope, pipeline/schema/ruleset versions, configuration, fingerprints, stage
+run references and statistics, warnings/errors, status, and timestamps. It is
+updated while running and finalized once; finalized manifests cannot be
+updated or deleted. Stage outputs stay in their existing persistence tables.
+
+The CLI supports these operations:
+
+```powershell
+# Process the current accepted observations using safe incremental reuse
+.\.venv\Scripts\python.exe -m archive pipeline run --mode incremental
+
+# Recompute the selected scope, unless all full-run inputs already match
+.\.venv\Scripts\python.exe -m archive pipeline run --mode full
+
+# Persist a G manifest and plan without writing inference-stage records
+.\.venv\Scripts\python.exe -m archive pipeline dry-run
+
+# Restrict processing to an explicit accepted import and/or scope
+.\.venv\Scripts\python.exe -m archive pipeline run --import-id 123 --channel-id 10
+
+# Inspect whether the latest completed result matches current inputs/config
+.\.venv\Scripts\python.exe -m archive pipeline status --channel-id 10
+
+# Read the latest report or select one by manifest UUID
+.\.venv\Scripts\python.exe -m archive pipeline report --run-id <pipeline-run-id>
+```
+
+Each command accepts `--database` and `--format text|json`; run and dry-run
+also accept `--server-id`, `--channel-id`, `--source-id`, `--import-id`, and
+repeatable `--message-id`. Status supports the server/channel/source/import
+scope filters. By default, input selection uses the latest accepted import of
+each current source capture. An explicit accepted `--import-id` may select a
+superseded historical capture; message-subset selection is intersected with
+that accepted scope, and missing/out-of-scope observations are rejected.
+Empty scopes are rejected. The caller must provide a connection without an
+open transaction; the CLI creates and owns such a connection.
+
+Incremental mode reuses each completed stage only when its input fingerprint
+and relevant configuration match. Boundary configuration changes invalidate C
+and dependent D, but need not invalidate E/F1. Alias changes invalidate E/F1
+without requiring new C/D runs. Confidence reuse also checks F2 staleness and
+review-relevant inputs. Full mode recomputes all inference stages when any
+relevant stage input or review state differs; an identical completed full run
+is a no-op reuse. Signal extraction itself is recalculated for current
+fingerprinting and reported counts, rather than stored as a separate run.
+
+Dry-run persists the G manifest only. Exact cached outputs may be identified
+as reusable; uncached stages are marked planned, and uncached confidence work
+is not calculated. A regular run commits the manifest at start and saves
+progress between stages. If a later stage fails, the failed manifest records
+the completed stage references and error. Already persisted upstream inference
+outputs are not rolled back across the whole pipeline; an incremental retry
+can safely reuse stages whose inputs still match.
+
+Reports include scope and input fingerprints, stages and run IDs, counts,
+candidate deltas, review-queue summary/staleness, warnings, and errors. Deltas
+describe current inference support, not deletion of historical facts. F2 is
+read for status/reporting only: G never confirms, rejects, links, excludes, or
+otherwise changes a human review decision. G also never creates or changes
+arcs, scenes, scene membership, participants, or attribution records. Test
+with temporary/controlled archives or explicit small scopes; do not assume a
+production-sized run is one atomic transaction.
 
 ## Target Archive Model
 
@@ -236,7 +461,7 @@ mechanism.
 
 ## Migration History
 
-The current migration chain has fifteen steps:
+The current migration chain has twenty-two steps:
 
 | Version | Migration | Effect |
 | ---: | --- | --- |
@@ -255,6 +480,13 @@ The current migration chain has fifteen steps:
 | 013 | `create_document_entries` | Creates the typed `document_entries` table, preserves retained legacy entries, and groups legacy document captures by source path. |
 | 014 | `create_attribution` | Creates character/player attribution records and immutable attribution audit events. |
 | 015 | `create_scenes` | Creates arcs, scenes, scene-message membership, participants, and the derived scene-channel view. |
+| 016 | `create_boundary_candidates` | Creates boundary detection runs, ordered input provenance, and scored transition candidates. |
+| 017 | `create_candidate_spans` | Creates provisional segmentation runs, spans, memberships, reply links, and boundary decisions, separately from curated scenes. |
+| 018 | `create_identity_candidates` | Creates provisional identity candidates, per-message evidence, and identity review history/overrides. |
+| 019 | `create_attribution_confidence` | Creates attribution confidence snapshots, candidates, and evidence contributions. |
+| 020 | `create_attribution_review` | Creates F2 review decisions, append-only review events, evidence overrides, and review input-change tracking. |
+| 021 | `harden_attribution_review` | Adds F2 integrity and stale-review protections for durable human decisions. |
+| 022 | `create_pipeline_runs` | Creates durable Phase G orchestration manifests with run status, scope/configuration, stage results, reports, warnings, and errors. |
 
 When present, incompatible legacy `imports`, `messages`, `documents`,
 `document_chunks`, `document_entries`, and the document FTS table are renamed
@@ -597,15 +829,23 @@ The actual archive was also migrated on a temporary copy before the live
 database was changed. After the live migration, `PRAGMA integrity_check`
 returned `ok`, `PRAGMA foreign_key_check` returned no violations, all listed
 document and chunk counts were preserved, and the migration ledger contained
-versions 1 through 11 at that point. The current regression tests pass against
-the version-15 migration chain.
+versions 1 through 11 at that point. The verification then covered migrations
+through version 15; later migration coverage is recorded below and in the
+current test suite.
 
 ## Current Limitations
 
-The Discord-specific target tables are empty because the existing live archive
-was document-only. The migration code can convert legacy Discord rows when
-those old tables exist, and its regression fixture covers that path, but no
-Discord export data was present in this database to convert.
+The database counts and schema versions documented in "Migration of the
+Existing Archive" and the earlier verification section are historical
+observations from the migration work, not a claim that the live archive was
+processed by Phase G. Phase G was tested against controlled in-memory test
+databases; it was not run against the live archive as part of that phase.
+Before an operational run, check the target database's migration status and
+make a backup according to the archive's normal operational procedure.
+
+The migration code can convert legacy Discord rows when those tables exist;
+its regression fixtures cover that path. The live archive was document-only
+when the historical migration counts below were captured.
 
 Both `src/build_archive.py` and `src/document_parser.py` use shared
 `sources`/`imports` provenance with typed message or document records. Document
@@ -615,10 +855,10 @@ in `messages`. Neither importer builds FTS.
 The live database was at schema version 11 when the startup checksum issue was
 investigated. Its ledger contains recognized historical checksums for
 migrations 001, 003–009, and 011. The runner now accepts those exact values while
-continuing to reject unknown checksum changes. A temporary copy of the live
-database upgraded to schema version 15 with `PRAGMA quick_check` returning `ok`
-and no foreign-key violations. The live database was not modified during that
-verification; launching `migrate` or `gui` applies its pending migrations.
+continuing to reject unknown checksum changes. At that earlier verification, a
+temporary copy upgraded to schema version 15 with `PRAGMA quick_check` returning
+`ok` and no foreign-key violations. That check predates migrations 016–022 and
+does not establish the current schema version of any live database.
 
 Migration 011 uses SQLite's `ALTER TABLE ... RENAME TO` syntax rather than SQL
 Server's `EXEC sp_rename`; the SQL Server statement prevented fresh SQLite
@@ -627,4 +867,15 @@ SQLite statement. Migration `.sql` files are SQLite-specific, so a SQL Server
 language-service warning about `RENAME` is not a SQLite runtime error. The
 isolated pilot was created after that correction. Historical migration
 checksums are handled by the explicit compatibility list described above.
-FTS indexes and thread support remain deferred.
+FTS indexes and normalized thread membership remain deferred. Thread evidence
+can be extracted only from metadata actually preserved in a message's source
+payload. Scene reconstruction beyond deterministic provisional spans,
+overlapping interactions, and cross-channel scene continuity remain future
+work; no candidate span is implicitly promoted to a curated scene.
+
+The Phase G regression and targeted migration/scope tests passed during
+implementation. The full Python unit-test suite then passed with 145 tests.
+The Phase G tests cover stage reuse and invalidation, changed accepted inputs,
+dry-run behavior, failed-stage recovery, F2 decision/audit preservation, and
+curated-scene preservation. This result verifies the tested code paths and
+fixtures, not a live-archive pipeline execution.
