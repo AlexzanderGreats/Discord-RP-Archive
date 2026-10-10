@@ -1,4 +1,3 @@
-```markdown
 # Discord RP Archive
 
 A local archiving and research application for long-running **Discord roleplay** servers. It ingests immutable raw exports (Discord JSON plus TXT/PDF/DOCX documents) into a single authoritative **SQLite** index, then layers on deterministic analysis — scene-boundary detection, provisional segmentation, character-identity inference, and attribution confidence — with a desktop GUI for reading, searching, curation, and human review. An optional local **Ollama** model powers an evidence-grounded Q&A view that answers only from retrieved archive records.
@@ -17,7 +16,6 @@ The design principles: the raw corpus is immutable; SQLite is the single source 
 - **Test suite** (`tests/`) covering importers, segmentation, signals, attribution, review, pipeline, sync, search, reader, GUI export/theming, and migrations.
 
 ## Repository layout
-```
 
 Items committed to Git:
 
