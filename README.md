@@ -17,6 +17,7 @@ The design principles: the raw corpus is immutable; SQLite is the single source 
 - **Test suite** (`tests/`) covering importers, segmentation, signals, attribution, review, pipeline, sync, search, reader, GUI export/theming, and migrations.
 
 ## Repository layout
+```
 
 Items committed to Git:
 
