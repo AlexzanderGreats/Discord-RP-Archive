@@ -154,7 +154,9 @@ RAW FILE → DISCOVERY → VALIDATION → PARSING → NORMALIZATION → DATABASE
 | **F3** Review GUI | `archive/gui.py`, `attribution_review_gui.py` | The Attribution Review tab; consequence-bearing actions require confirmation. |
 | **G** Orchestration | `archive/pipeline.py` | Coordinates B–F1, records runs in the `pipeline_runs` manifest, supports incremental reuse and reporting. Does not touch curated scenes or F2 decisions. |
 
-Scene curation (`archive/scenes.py`) is separate from analysis: membership is explicit and ordered by curator choice (never inferred from timestamps), with participants tracked independently. Attribution claims (`archive/attribution.py`) are the reviewable system for registered identities — rules create *pending* proposals only; models may| Phase | Module(s) | Produces |
+Scene curation (`archive/scenes.py`) is separate from analysis: membership is explicit and ordered by curator choice (never inferred from timestamps), with participants tracked independently. Attribution claims (`archive/attribution.py`) are the reviewable system for registered identities — rules create *pending* proposals only; models may
+
+| Phase | Module(s) | Produces |
 | --- | --- | --- |
 | **B** Signals | `archive/signals.py` | Deterministic evidence: timestamp gaps, channel/author changes, replies, scene-control markers, speaker labels, OOC and context lines. Pure analysis — no DB writes, no scoring. |
 | **C** Boundaries | `archive/boundaries.py`, `boundary_persistence.py` | Scores each adjacent pair; classifies hard / strong/soft candidates with full contribution provenance. |
