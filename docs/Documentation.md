@@ -128,6 +128,7 @@ B: signal extraction
    -> F2: human review actions and durable audit
    -> F3: review GUI
    -> G: orchestration and reporting for B–F1
+   -> H: event and arc curation over candidate spans
 ```
 
 This sequence does not collapse the concepts into one detector. Segmentation
@@ -136,7 +137,11 @@ decides which messages belong to which candidate scenes; attribution evidence
 concerns represented characters and players; and confidence/review distinguish
 automatically triageable results from conclusions that require a person.
 Phase G runs only through F1. It does not apply F2 review actions, create
-curated scenes, or claim to solve later reconstruction.
+curated scenes, or claim to solve later reconstruction. Phase H is an
+explicit human review and curation layer over deterministic candidate spans:
+reviewers can inspect a group of provisional spans, decide whether it constitutes
+a coherent event, and optionally accept it into the authoritative scene/arc
+model.
 
 ### B — Deterministic signal extraction
 
@@ -336,6 +341,63 @@ otherwise changes a human review decision. G also never creates or changes
 arcs, scenes, scene membership, participants, or attribution records. Test
 with temporary/controlled archives or explicit small scopes; do not assume a
 production-sized run is one atomic transaction.
+
+### H — Event and arc curation
+
+`archive/event_curation.py` adds a thin human-curation layer on top of the
+existing deterministic segmentation pipeline. It does not replace the
+authoritative `scenes`/`arcs` model or re-interpret the boundary algorithm. It
+instead groups existing provisional candidate spans into reviewable event
+candidates, records the reasoning and review lifecycle, and allows a curator to
+accept a candidate into the authoritative scene archive or assign it to an arc
+for later editorial work.
+
+The generator is intentionally deterministic. Candidate spans are sorted by
+server, channel, source, time, and span ID; adjacent spans are merged only when
+they remain in scope and the observed gap stays within the configured threshold.
+A run stores its input fingerprint, algorithm version, configuration hash, and the
+candidate/span memberships it produced; duplicated inputs reuse the same run
+identity rather than creating a second candidate set. This keeps event
+candidates traceable to the same evidence used by D without mixing them with
+curated scenes.
+
+Migration 023 adds the durable storage for the H layer. The schema adds
+`event_candidate_runs`, `event_candidates`, `event_candidate_members`,
+`event_candidate_arc_memberships`, and `event_candidate_review_events`. The
+candidate record keeps its provisional title/description/status, stale reason,
+accepted scene reference, and review state; membership rows preserve the exact
+message and candidate-span evidence used to form the candidate; review events
+provide append-only audit history for accept / reject / defer / stale /
+adjust-grouping / arc-assignment actions.
+
+The supported lifecycle is explicit and human-mediated:
+
+- `generate_event_candidates()` creates reviewable candidates from current
+  candidate spans.
+- `list_event_candidates()` and `get_event_candidate()` read the queue and detail
+  model.
+- `update_event_candidate()` edits the provisional metadata and review state.
+- `reject_event_candidate()` and `defer_event_candidate()` record a human
+  decision without touching authoritative scene records.
+- `mark_event_candidate_stale()` marks a candidate as no longer current when the
+  input evidence has changed.
+- `assign_event_candidate_to_arc()` and `remove_event_candidate_from_arc()` add
+  or remove arc-level grouping without modifying archived scenes.
+- `adjust_event_candidate_grouping()` allows a curator to redefine the grouped
+  candidate spans while retaining historical evidence.
+- `accept_event_candidate()` creates a real `scene` record from the selected
+  candidate and copies the candidate's member messages into it, leaving the
+  candidate itself as a durable review artifact and audit trail.
+
+The `Arc & Event Curation` GUI tab in `archive/gui.py` remains intentionally
+lightweight. It presents the queue and detail surface but does not embed the
+generation or acceptance logic; those remain in the service layer so the app can
+present a review workflow without bypassing the core rules or creating a second
+authoritative narrative model.
+
+This phase is additive and safety-oriented. It makes the provisional event and
+arc curation process visible and reviewable without replacing the authoritative
+scene/arc pipeline or silently rewriting existing curated records.
 
 ## Target Archive Model
 
