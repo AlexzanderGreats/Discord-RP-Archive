@@ -157,6 +157,7 @@ class ArchiveApp:
         self._build_reader()
         self._build_ask()
         self._build_attribution_review()
+        self._build_event_curation()
         self._apply_theme()
         self._poll_system_theme()
 
@@ -180,6 +181,30 @@ class ArchiveApp:
             AttributionReviewService(self._attribution_review_connection),
             self._run_background,
         )
+
+    def _build_event_curation(self) -> None:
+        page = ttk.Frame(self.pages)
+        self.pages.add(page, text="Arc & Event Curation")
+
+        toolbar = ttk.Frame(page, padding=(12, 12, 12, 8))
+        toolbar.pack(fill="x")
+        ttk.Label(toolbar, text="Candidate queue", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.event_curation_queue = tk.Listbox(page, height=12)
+        self.event_curation_queue.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        detail = ttk.Frame(page)
+        detail.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        ttk.Label(detail, text="Candidate detail", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.event_curation_detail = ttk.Label(
+            detail,
+            text="No event candidate is selected. Candidate grouping and arc assignment remain in the service layer.",
+            wraplength=700,
+            justify="left",
+        )
+        self.event_curation_detail.pack(anchor="w", pady=(8, 0))
+        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=(10, 6))
+        ttk.Label(detail, text="Event and arc editor", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(detail, text="Title, description, notes, accepted scene, and arc assignment remain explicit human actions.").pack(anchor="w", pady=(8, 0))
 
     def _load_theme_preference(self) -> str:
         try:
