@@ -23,7 +23,7 @@ class GuiExportTests(unittest.TestCase):
                 settings={
                     "temperature": 0.2,
                     "thinking": "disabled (think=false)",
-                    "context": "default (Ollama; num_ctx not sent)",
+                    "context": "model default (num_ctx not sent)",
                     "max tokens": 384,
                 },
             ),

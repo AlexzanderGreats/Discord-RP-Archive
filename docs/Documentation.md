@@ -744,15 +744,22 @@ The Ollama `num_predict` output budget is selected by question type:
 | Normal QA | 768 |
 | Chronology | 1,024 |
 | Synthesis | 1,024 |
-| Research | 1,536 |
+| Research | 1,536 (3,072 for GPT-OSS) |
 
 The budget controls the maximum generated output, not the prompt or context
-window. Thinking remains disabled, temperature is `0.2`, and `num_ctx` is not
-sent, so Ollama uses its configured default. If no evidence is retrieved, the
-model is not called. The model is instructed to cite evidence references, but
-citations are not independently validated. Retrieval and classification tests
-are in `tests/test_search_reader_services.py` and
-`tests/test_ollama_service.py`.
+window. Requests to `gpt-oss` models set `num_ctx` to 8,192; other models use
+their Ollama-configured context default and retain the 1,536-token research
+budget. To reserve space for the larger GPT-OSS answer, its serialized evidence
+payload is capped at 12,000 characters; other models are capped at 6,000
+characters. Each message's content is limited to 1,200 characters. Explicit
+requests for all arguments, debates, or disputes retrieve up to 32 matching
+anchors, balanced across channel/day groups, before adding nearby context. The
+model is asked to group those positions by channel/day and not claim archive-wide
+completeness unless the evidence supports it. Thinking remains disabled and
+temperature is `0.2`. If no evidence is retrieved, the model is not called. The
+model is instructed to cite evidence references, but citations are not
+independently validated. Retrieval and classification tests are in
+`tests/test_search_reader_services.py` and `tests/test_ollama_service.py`.
 
 ## Desktop GUI and Startup Synchronization
 
@@ -792,9 +799,10 @@ metadata to the local Ollama chat API. The Answer view displays the response
 and retrieved evidence. The LLM Diagnostics view shows retrieval results, the
 exact user-message context and system instructions sent to Ollama, the selected
 model, request settings, and the answer. The context includes the question and
-JSON evidence payload; each message's content is truncated to 1,500 characters
-before being sent. **Export test** saves the diagnostics and answer as a `.txt`
-file and becomes available after an answer is generated.
+JSON evidence payload, limited to 12,000 serialized characters for GPT-OSS or
+6,000 for other models, with a maximum of 1,200 characters per message.
+**Export test** saves the diagnostics and answer as a `.txt` file and becomes
+available after an answer is generated.
 
 The GUI theme selector supports **System**, **Light**, and **Dark** modes. System
 mode follows the OS appearance preference where it can be detected and checks

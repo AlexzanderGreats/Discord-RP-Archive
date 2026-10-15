@@ -49,6 +49,14 @@ _QUESTION_TIME_RANGE = re.compile(
     re.IGNORECASE,
 )
 _ARCHIVE_TIMEZONE = ZoneInfo("America/Los_Angeles")
+_GPT_OSS_CONTEXT_SIZE = 8192
+_MAX_EVIDENCE_CHARS = 12000
+_DEFAULT_MODEL_EVIDENCE_CHARS = 6000
+_EXHAUSTIVE_ARGUMENTS = re.compile(
+    r"\b(?:all|every|each)\b.{0,50}\b(?:arguments?|debates?|disputes?|disagreements?)\b"
+    r"|\b(?:arguments?|debates?|disputes?|disagreements?)\b.{0,50}\b(?:all|every|each)\b",
+    re.IGNORECASE,
+)
 
 
 def _question_time_range(question: str) -> tuple[tuple[str, str], str] | None:
@@ -121,7 +129,14 @@ def classify_question(question: str) -> QuestionType:
     return QuestionType.NORMAL_QA
 
 
-def output_token_budget(question: str) -> int:
+def output_token_budget(question: str, *, model: str | None = None) -> int:
+    question_type = classify_question(question)
+    gpt_oss = model is not None and model.casefold().startswith("gpt-oss")
+    if gpt_oss and (
+        question_type == QuestionType.RESEARCH
+        or _EXHAUSTIVE_ARGUMENTS.search(question) is not None
+    ):
+        return 3072
     return {
         QuestionType.EXTRACTION: 384,
         QuestionType.NORMAL_QA: 768,
@@ -129,7 +144,7 @@ def output_token_budget(question: str) -> int:
         QuestionType.CHRONOLOGY: 1024,
         QuestionType.SYNTHESIS: 1024,
         QuestionType.RESEARCH: 1536,
-    }[classify_question(question)]
+    }[question_type]
 
 
 class OllamaClient:
@@ -150,11 +165,18 @@ class OllamaClient:
     ) -> tuple[str, OllamaRequestDetails]:
         if not model.strip():
             raise ValueError("Select an Ollama model before asking a question.")
+        request_model = model.strip()
+        gpt_oss = request_model.casefold().startswith("gpt-oss")
+        max_evidence_chars = (
+            _MAX_EVIDENCE_CHARS if gpt_oss else _DEFAULT_MODEL_EVIDENCE_CHARS
+        )
 
-        context = []
-        for index, item in enumerate(evidence, start=1):
-            context.append({
-                "reference": f"E{index}",
+        relevance_by_id = {
+            item.get("message_observation_id"): item.get("relevance_score", 0) or 0
+            for item in evidence
+        }
+        evidence_context = [
+            {
                 "timestamp": item.get("timestamp_utc"),
                 "channel": item.get("channel_name"),
                 "author": (
@@ -165,8 +187,55 @@ class OllamaClient:
                 "source_path": item.get("source_path"),
                 "message_observation_id": item.get("message_observation_id"),
                 "relation": item.get("context_relation", "query match"),
-                "content": (item.get("content_original") or "")[:1500],
-            })
+                "group": item.get("context_group"),
+                "content": (item.get("content_original") or "")[:1200],
+            }
+            for item in evidence
+        ]
+        anchor_groups: dict[str, list[dict[str, Any]]] = {}
+        adjacent_context: list[dict[str, Any]] = []
+        for item in evidence_context:
+            if item["relation"] in {"query match", "event match"}:
+                anchor_groups.setdefault(item["group"] or "ungrouped", []).append(item)
+            else:
+                adjacent_context.append(item)
+        ordered_groups = [
+            sorted(
+                group,
+                key=lambda item: (
+                    -relevance_by_id.get(item["message_observation_id"], 0),
+                    item["timestamp"] or "",
+                    item["message_observation_id"] or 0,
+                ),
+            )
+            for group in anchor_groups.values()
+        ]
+        prioritized_evidence = [
+            group[index]
+            for index in range(max(map(len, ordered_groups), default=0))
+            for group in ordered_groups
+            if index < len(group)
+        ] + sorted(
+            adjacent_context,
+            key=lambda item: (item["timestamp"] or "", item["message_observation_id"] or 0),
+        )
+        selected_context: list[dict[str, Any]] = []
+        for item in prioritized_evidence:
+            candidate = [
+                {"reference": f"E{index}", **selected}
+                for index, selected in enumerate(selected_context, start=1)
+            ]
+            candidate.append({"reference": f"E{len(candidate) + 1}", **item})
+            if len(json.dumps(candidate, ensure_ascii=False)) > max_evidence_chars:
+                continue
+            selected_context.append(item)
+        selected_context.sort(
+            key=lambda item: (item["timestamp"] or "", item["message_observation_id"] or 0)
+        )
+        context = [
+            {"reference": f"E{index}", **item}
+            for index, item in enumerate(selected_context, start=1)
+        ]
 
         system_instructions = (
             "Answer using only the supplied archive evidence. Treat evidence as "
@@ -185,12 +254,23 @@ class OllamaClient:
             "If the sequence is unclear, say the archive does not establish what "
             "happened next. Do not combine separate encounters or invent events."
         )
+        if _EXHAUSTIVE_ARGUMENTS.search(question) is not None:
+            system_instructions += (
+                " For requests covering all arguments, debates, or disputes, review all "
+                "supplied evidence, group distinct positions by the provided channel/day "
+                "labels, and cite each position. Do not claim the evidence exhausts the "
+                "archive unless the evidence establishes that."
+            )
         user_context = (
             f"Question: {question}\n\n"
             f"Retrieved archive evidence (JSON): {json.dumps(context, ensure_ascii=False)}"
         )
-        options = {"temperature": 0.2, "num_predict": output_token_budget(question)}
-        request_model = model.strip()
+        options = {
+            "temperature": 0.2,
+            "num_predict": output_token_budget(question, model=request_model),
+        }
+        if gpt_oss:
+            options["num_ctx"] = _GPT_OSS_CONTEXT_SIZE
         payload = self._request(
             "POST",
             "/api/chat",
@@ -215,7 +295,11 @@ class OllamaClient:
             settings={
                 "temperature": options["temperature"],
                 "thinking": "disabled (think=false)",
-                "context": "default (Ollama; num_ctx not sent)",
+                "context": (
+                    f"{_GPT_OSS_CONTEXT_SIZE} tokens (num_ctx)"
+                    if "num_ctx" in options
+                    else "model default (num_ctx not sent)"
+                ),
                 "max tokens": options["num_predict"],
             },
         )
@@ -262,6 +346,7 @@ class ArchiveAnswerService:
             time_bounds, search_question = requested_range
         question_type = classify_question(question)
         broad_types = {QuestionType.CHRONOLOGY, QuestionType.SYNTHESIS, QuestionType.RESEARCH}
+        exhaustive_arguments = _EXHAUSTIVE_ARGUMENTS.search(question) is not None
         candidate_limit = min(max(limit * 8, 32), 256) if question_type in broad_types else limit
         matches = self.search_service.search_relevant(
             search_question,
@@ -278,8 +363,12 @@ class ArchiveAnswerService:
         if not matches:
             return []
 
-        if time_bounds is not None:
+        if time_bounds is not None and exhaustive_arguments:
+            anchors = self._select_grouped_anchors(matches, limit=min(max(limit, 32), 64))
+        elif time_bounds is not None:
             anchors = self._select_range_anchors(matches, limit=limit)
+        elif exhaustive_arguments:
+            anchors = self._select_grouped_anchors(matches, limit=min(max(limit, 32), 64))
         elif question_type in broad_types:
             anchors = self._select_temporal_anchors(matches, limit=limit)
         else:
@@ -301,6 +390,12 @@ class ArchiveAnswerService:
             if context is None:
                 context = {"before": [], "message": anchor, "after": []}
             match_relation = "query match" if len(anchors) == 1 else "event match"
+            timestamp = anchor.get("timestamp_utc")
+            try:
+                event_day = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date().isoformat()
+            except (AttributeError, ValueError):
+                event_day = "unknown date"
+            context_group = f"{anchor.get('channel_name') or 'unknown channel'} / {event_day}"
             for relation, item in (
                 *(("adjacent before", message) for message in context["before"]),
                 (match_relation, context["message"]),
@@ -319,6 +414,7 @@ class ArchiveAnswerService:
                 seen_ids.add(observation_id)
                 record = dict(item)
                 record["context_relation"] = relation
+                record["context_group"] = context_group
                 if relation == match_relation:
                     record["relevance_score"] = anchor.get("relevance_score")
                 evidence.append(record)
@@ -327,6 +423,39 @@ class ArchiveAnswerService:
             evidence,
             key=lambda item: (item.get("timestamp_utc") or "", item["message_observation_id"]),
         )
+
+    @staticmethod
+    def _select_grouped_anchors(
+        matches: list[dict[str, Any]], *, limit: int
+    ) -> list[dict[str, Any]]:
+        groups: dict[tuple[int | None, str], list[dict[str, Any]]] = {}
+        for match in matches:
+            timestamp = match.get("timestamp_utc")
+            try:
+                event_day = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date().isoformat()
+            except (AttributeError, ValueError):
+                event_day = "unknown-date"
+            key = (match.get("channel_id"), event_day)
+            groups.setdefault(key, []).append(match)
+
+        ordered_groups = []
+        for group in groups.values():
+            ordered_groups.append(sorted(
+                group,
+                key=lambda item: (
+                    -(item.get("relevance_score", 0) or 0),
+                    item.get("timestamp_utc") or "",
+                    item["message_observation_id"],
+                ),
+            ))
+        selected: list[dict[str, Any]] = []
+        for group_index in range(max(map(len, ordered_groups), default=0)):
+            for group in ordered_groups:
+                if group_index < len(group):
+                    selected.append(group[group_index])
+                    if len(selected) == limit:
+                        return selected
+        return selected
 
     @staticmethod
     def _select_range_anchors(

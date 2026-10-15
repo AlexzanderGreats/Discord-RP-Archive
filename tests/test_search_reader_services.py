@@ -149,6 +149,24 @@ class SearchReaderServiceTests(unittest.TestCase):
             ["2026-01-01", "2026-01-08", "2026-01-20"],
         )
 
+    def test_all_arguments_retrieval_selects_many_grouped_matches(self) -> None:
+        self._write_export([
+            {
+                "id": f"argument-{index}",
+                "timestamp": f"2026-01-01T00:{index:02}:00Z",
+                "content": f"Chaos argument {index}: position and response.",
+            }
+            for index in range(40)
+        ])
+        import_file(self.connection, self.export_path)
+        answer_service = ArchiveAnswerService(self.search_service, None)
+
+        evidence = answer_service.retrieve("What are all arguments about Chaos?")
+
+        event_matches = [item for item in evidence if item["context_relation"] == "event match"]
+        self.assertEqual(len(event_matches), 32)
+        self.assertTrue(all(item["context_group"] == "Channel / 2026-01-01" for item in event_matches))
+
     def test_explicit_date_time_range_limits_retrieval_and_keeps_range_context(self) -> None:
         self.export_path.write_text(
             json.dumps({

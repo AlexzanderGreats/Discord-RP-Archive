@@ -49,7 +49,7 @@ class OllamaServiceTests(unittest.TestCase):
         self.assertEqual(details.settings, {
             "temperature": payload["options"]["temperature"],
             "thinking": "disabled (think=false)",
-            "context": "default (Ollama; num_ctx not sent)",
+            "context": "model default (num_ctx not sent)",
             "max tokens": 384,
         })
 
@@ -72,6 +72,8 @@ class OllamaServiceTests(unittest.TestCase):
             ("How did their relationship evolve across several events?", 1024),
             ("Compare their relationship across scenes.", 1024),
             ("Give an overview of all interactions across the archive.", 1536),
+            ("What are all arguments about Chaos?", 1536),
+            ("What were all arguments on 9/18/2025 from 1:31 AM to 3:02 PM?", 1024),
             ("Who played Winter?", 512),
         ]
         client = OllamaClient()
@@ -85,6 +87,42 @@ class OllamaServiceTests(unittest.TestCase):
                 request_body = request.call_args.args[2]
                 self.assertEqual(request_body["options"]["num_predict"], expected_budget)
                 self.assertEqual(details.settings["max tokens"], expected_budget)
+
+    def test_gpt_oss_uses_explicit_context_and_evidence_is_capped(self) -> None:
+        evidence = [
+            {
+                "message_observation_id": index,
+                "timestamp_utc": f"2026-01-01T00:{index:02}:00Z",
+                "channel_name": "Channel",
+                "context_relation": "event match",
+                "context_group": f"Channel / 2026-01-{index:02}",
+                "content_original": "Chaos argument " + ("evidence " * 150),
+                "relevance_score": 1,
+            }
+            for index in range(1, 40)
+        ]
+
+        client = OllamaClient()
+        with patch.object(
+            client,
+            "_request",
+            return_value={"message": {"content": "There were multiple arguments [E1]."}},
+        ) as request:
+            _answer, details = client.generate_with_details(
+                "gpt-oss:20b",
+                "What were all arguments about Chaos on 9/18/2025 from 1:31 AM to 3:02 PM?",
+                evidence,
+            )
+
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+        self.assertEqual(payload["options"]["num_predict"], 3072)
+        self.assertEqual(details.settings["context"], "8192 tokens (num_ctx)")
+        self.assertIn("group distinct positions by the provided channel/day labels", details.system_instructions)
+        evidence_json = details.user_context.split("Retrieved archive evidence (JSON): ", 1)[1]
+        serialized_evidence = json.loads(evidence_json)
+        self.assertLessEqual(len(json.dumps(serialized_evidence, ensure_ascii=False)), 12000)
+        self.assertTrue(all(item["group"].startswith("Channel / ") for item in serialized_evidence))
 
     def test_list_models_reads_local_tags(self) -> None:
         response = MagicMock()
