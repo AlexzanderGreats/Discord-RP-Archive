@@ -747,7 +747,7 @@ The Ollama `num_predict` output budget is selected by question type:
 | Research | 1,536 (3,072 for GPT-OSS) |
 
 The budget controls the maximum generated output, not the prompt or context
-window. Requests to `gpt-oss` models set `num_ctx` to 8,192; other models use
+window. Requests to `gpt-oss` models set `num_ctx` to 12,288; other models use
 their Ollama-configured context default and retain the 1,536-token research
 budget. To reserve space for the larger GPT-OSS answer, its serialized evidence
 payload is capped at 12,000 characters; other models are capped at 6,000

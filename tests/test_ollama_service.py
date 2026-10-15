@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-from archive.ollama_service import ArchiveAnswerService, OllamaClient
+from archive.ollama_service import ArchiveAnswerService, OllamaClient, OllamaError
 
 
 class OllamaServiceTests(unittest.TestCase):
@@ -115,14 +115,35 @@ class OllamaServiceTests(unittest.TestCase):
             )
 
         payload = request.call_args.args[2]
-        self.assertEqual(payload["options"]["num_ctx"], 8192)
+        self.assertEqual(payload["options"]["num_ctx"], 12288)
         self.assertEqual(payload["options"]["num_predict"], 3072)
-        self.assertEqual(details.settings["context"], "8192 tokens (num_ctx)")
+        self.assertEqual(details.settings["context"], "12288 tokens (num_ctx)")
         self.assertIn("group distinct positions by the provided channel/day labels", details.system_instructions)
         evidence_json = details.user_context.split("Retrieved archive evidence (JSON): ", 1)[1]
         serialized_evidence = json.loads(evidence_json)
         self.assertLessEqual(len(json.dumps(serialized_evidence, ensure_ascii=False)), 12000)
         self.assertTrue(all(item["group"].startswith("Channel / ") for item in serialized_evidence))
+
+    def test_empty_answer_reports_completion_metadata_without_thinking_text(self) -> None:
+        client = OllamaClient()
+        with patch.object(
+            client,
+            "_request",
+            return_value={
+                "message": {"content": "", "thinking": "private reasoning"},
+                "done_reason": "length",
+                "prompt_eval_count": 6448,
+                "eval_count": 1744,
+            },
+        ):
+            with self.assertRaisesRegex(
+                OllamaError,
+                r"done_reason=length, prompt_tokens=6448, generated_tokens=1744, "
+                r"num_ctx=model default, num_predict=768; response included 17 characters",
+            ) as raised:
+                client.generate_with_details("test-model", "What happened?", [])
+
+        self.assertNotIn("private reasoning", str(raised.exception))
 
     def test_list_models_reads_local_tags(self) -> None:
         response = MagicMock()

@@ -49,7 +49,7 @@ _QUESTION_TIME_RANGE = re.compile(
     re.IGNORECASE,
 )
 _ARCHIVE_TIMEZONE = ZoneInfo("America/Los_Angeles")
-_GPT_OSS_CONTEXT_SIZE = 8192
+_GPT_OSS_CONTEXT_SIZE = 12288
 _MAX_EVIDENCE_CHARS = 12000
 _DEFAULT_MODEL_EVIDENCE_CHARS = 6000
 _EXHAUSTIVE_ARGUMENTS = re.compile(
@@ -285,9 +285,25 @@ class OllamaClient:
                 ],
             },
         )
-        answer = payload.get("message", {}).get("content", "").strip()
+        message = payload.get("message")
+        answer_value = message.get("content") if isinstance(message, dict) else None
+        answer = answer_value.strip() if isinstance(answer_value, str) else ""
         if not answer:
-            raise OllamaError("Ollama returned an empty answer.")
+            done_reason = payload.get("done_reason", "unknown")
+            generated_tokens = payload.get("eval_count", "unknown")
+            prompt_tokens = payload.get("prompt_eval_count", "unknown")
+            thinking = message.get("thinking") if isinstance(message, dict) else None
+            thinking_note = (
+                f"; response included {len(thinking)} characters of internal reasoning"
+                if isinstance(thinking, str) and thinking
+                else ""
+            )
+            raise OllamaError(
+                "Ollama returned no answer text "
+                f"(done_reason={done_reason}, prompt_tokens={prompt_tokens}, "
+                f"generated_tokens={generated_tokens}, num_ctx={options.get('num_ctx', 'model default')}, "
+                f"num_predict={options['num_predict']}{thinking_note})."
+            )
         details = OllamaRequestDetails(
             model=request_model,
             user_context=user_context,
